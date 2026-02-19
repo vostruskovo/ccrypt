@@ -403,7 +403,7 @@ encrypt_complete() {
     echo "Step 1: SSL Content Encryption (encrypts all file contents)"
     echo "--------------------------------------------------------"
     enc_ssl
-    
+
     echo -e "\nStep 2: Update databases with new .ssl files"
     echo "--------------------------------------------------------"
     toFile
@@ -425,8 +425,8 @@ decrypt_complete() {
     echo "=== COMPLETE DECRYPTION PROCESS ==="
     echo "Step 1: MD5 Filename Restoration (restores original filenames)"
     echo "--------------------------------------------------------"
-    decFile01
     decFolder01
+    decFile01
     
     echo -e "\nStep 2: SSL Content Decryption (decrypts all .ssl file contents)"
     echo "--------------------------------------------------------"

@@ -203,44 +203,28 @@ dec_ssl() {
     fi
     
     local bits=256
-    # Find all .ssl files
-    local tree=( $(find . -name "*.ssl" -type f 2>/dev/null | sed 's/^\.\///') )
+    # Find all .ssl files recursively
+    local ssl_files=( $(find . -name "*.ssl" -type f 2>/dev/null | sed 's/^\.\///') )
     local decrypted_count=0
     
-    echo "Found ${#tree[@]} SSL files to decrypt"
+    echo "Found ${#ssl_files[@]} SSL files to decrypt"
     
-    if [[ $# -gt 0 ]]; then
-        # Decrypt specific files
-        for target in "$@"; do
-            target="${target#./}"
-            if [[ -f "$target" && "$target" == *.ssl ]]; then
-                # Remove .ssl extension for output
-                local output="${target%.ssl}"
-                echo "Decrypting: $target -> $output"
-                if openssl enc -d -aes-256-cbc -in "$target" -out "$output" -k "$ssl_pass" 2>/dev/null; then
-                    rm "$target"
-                    echo "  Decrypted: $target"
-                    ((decrypted_count++))
-                else
-                    echo "  Failed to decrypt: $target (wrong password?)"
-                fi
-            fi
-        done
-    else
-        # Decrypt all .ssl files
-        for file in "${tree[@]}"; do
+    if [[ ${#ssl_files[@]} -gt 0 ]]; then
+        for file in "${ssl_files[@]}"; do
             local output="${file%.ssl}"
             echo "Decrypting: $file -> $output"
-            if openssl enc -d -aes-256-cbc -in "$file" -out "$output" -k "$ssl_pass" 2>/dev/null; then
+            if openssl enc -d -aes-${bits}-cbc -in "$file" -out "$output" -k "$ssl_pass" 2>/dev/null; then
                 rm "$file"
-                echo "  Decrypted: $file"
+                echo "  ✓ Decrypted: $file"
                 ((decrypted_count++))
             else
-                echo "  Failed to decrypt: $file (wrong password?)"
+                echo "  ✗ Failed to decrypt: $file (wrong password or corrupted file?)"
             fi
         done
+        echo "SSL Decryption complete: $decrypted_count files decrypted"
+    else
+        echo "No .ssl files found to decrypt"
     fi
-    echo "SSL Decryption complete: $decrypted_count files decrypted"
 }
 
 # MD5 Rename Encryption - renames files to MD5 hashes
@@ -266,10 +250,10 @@ encFile01() {
         
         # If it's a .ssl file, we want to keep the .ssl extension but rename the base
         if [[ "$filename" == *.ssl ]]; then
-            local base="${filename%.ssl}"
-            local C_base=$(encrypt "$base")
-            echo "Renaming: $file -> $root/${C_base}.ssl"
-            mv "$file" "$root/${C_base}.ssl" 2>/dev/null
+            
+            local C_base=$(encrypt "${filename}")
+            echo "Renaming: $file -> $root/${C_base}"
+            mv "$file" "$root/${C_base}" 2>/dev/null
             ((renamed_count++))
         else
             echo "Renaming: $file -> $root/$C_name"
@@ -293,8 +277,11 @@ decFile01() {
     fi
     
     local allfiles=($(cat "$pathToFile"))
+    # Find all files recursively, excluding directories
     local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
     local restored_count=0
+    
+    echo "Found ${#tree[@]} files to process for name restoration"
     
     for current_file in "${tree[@]}"; do
         local current_name=$(getFile "$current_file")
@@ -317,6 +304,11 @@ decFile01() {
                 
                 if [[ "$base_name" == "$C_orig" ]]; then
                     local orig_path=$(getROOT "$original")
+                    # Create destination directory if it doesn't exist
+                    if [[ "$orig_path" != "." ]]; then
+                        mkdir -p "$orig_path" 2>/dev/null
+                    fi
+                    
                     if [[ "$is_ssl" == true ]]; then
                         echo "Restoring: $current_file -> $orig_path/${orig_name}.ssl"
                         mv "$current_file" "$orig_path/${orig_name}.ssl" 2>/dev/null
@@ -372,8 +364,11 @@ decFolder01() {
     fi
 
     local allfolders=($(cat "$pathToFolder"))
-    # Get all directories (deepest first)
+    # Get all directories (deepest first for proper hierarchy)
     local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///' | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-) )
+    local restored_count=0
+    
+    echo "Found ${#tree[@]} folders to process for name restoration"
     
     for current_folder in "${tree[@]}"; do
         local current_name=$(getFile "$current_folder")
@@ -388,13 +383,18 @@ decFolder01() {
                 if [[ "$current_name" == "$C_orig" ]]; then
                     local current_path=$(getROOT "$current_folder")
                     local orig_path=$(getROOT "$original")
+                    
                     echo "Restoring folder: $current_folder -> $orig_path/$orig_name"
                     mv "$current_folder" "$orig_path/$orig_name" 2>/dev/null
+                    if [[ $? -eq 0 ]]; then
+                        ((restored_count++))
+                    fi
                     break
                 fi
             done
         fi
     done
+    echo "Folder restoration complete: $restored_count folders restored"
 }
 
 # NEW: Complete encryption function (SSL FIRST, THEN MD5 rename)
@@ -411,8 +411,8 @@ encrypt_complete() {
     
     echo -e "\nStep 3: MD5 Filename Encryption (renames all files to MD5 hashes)"
     echo "--------------------------------------------------------"
-    encFile01
-    encFolder01
+    #encFile01
+    #encFolder01
     
     echo -e "\n=== ENCRYPTION COMPLETE ==="
     echo "All files are now:"
@@ -425,8 +425,8 @@ decrypt_complete() {
     echo "=== COMPLETE DECRYPTION PROCESS ==="
     echo "Step 1: MD5 Filename Restoration (restores original filenames)"
     echo "--------------------------------------------------------"
-    decFolder01
-    decFile01
+    #decFolder01
+    #decFile01
     
     echo -e "\nStep 2: SSL Content Decryption (decrypts all .ssl file contents)"
     echo "--------------------------------------------------------"

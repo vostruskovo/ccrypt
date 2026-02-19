@@ -539,7 +539,7 @@ encrypt_all() {
     # Step 2: SSL content encryption (on ALL files, including MD5 renamed ones)
     echo -e "\n=== Step 2: SSL Content Encryption ==="
     enc_ssl
-    
+    encFolder01
     echo -e "\n=== ENCRYPTION COMPLETE ==="
     echo "All files are now:"
     echo "  1. Renamed to MD5 hashes"
@@ -552,11 +552,12 @@ decrypt_all() {
     
     # Step 1: SSL content decryption (reverse order)
     echo -e "\n=== Step 1: SSL Content Decryption ==="
+    decFolder01
     dec_ssl
     
     # Update databases after SSL decryption
-    toFile
-    toFolder
+    #toFile
+    #toFolder
     
     # Step 2: MD5 rename decryption
     echo -e "\n=== Step 2: MD5 Rename Decryption ==="
@@ -564,7 +565,6 @@ decrypt_all() {
     
     # Step 3: Folder MD5 rename decryption
     echo -e "\n=== Step 3: Folder MD5 Rename Decryption ==="
-    decFolder01
     
     echo -e "\n=== DECRYPTION COMPLETE ==="
 }

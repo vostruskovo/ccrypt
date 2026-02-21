@@ -9,8 +9,78 @@ pathToEnc="/etc/configSslEnc_ccript.txt"
 
 # Global variables
 pass=""
-hash="md5"
+hash="sha512"
+sizeHash=$(echo -n ${hash} | ${hash}sum | wc -c)
+cpt=.ssl
+sizeOfCpt=${#cpt}
 
+#<<isaEncOne
+isaEncOne() {
+    file=$1
+    case ${hash} in
+        "md5")
+        if [[ ${#1} -eq 32 ]]; then
+            echo 1
+        else
+            echo 0
+        fi
+;;
+        "sha1")
+        [[ ${#1} -eq 40  ]] && echo 1 || echo 0 
+;;
+        "sha256")
+        echo $(( ${#1} == 64 ? 1 : 0 ))
+;;
+        "sha512")
+        if (( ${#1} == 128 )); then
+            echo 1
+        else
+            echo 0
+        fi        
+;;
+    esac
+
+}
+#isaEncOne
+
+
+<<isaEncOne
+isaEncOne() {
+    case "$hash" in
+        md5)
+            if [[ ${#1} -eq 32 ]]; then
+                echo 1
+            else
+                echo 0
+            fi
+            ;;
+        sha1)
+            if [[ ${#1} -eq 40 ]]; then
+                echo 1
+            else
+                echo 0
+            fi
+            ;;
+        sha256)
+            if [[ ${#1} -eq 64 ]]; then
+                echo 1
+            else
+                echo 0
+            fi
+            ;;
+        sha512)
+            if [[ ${#1} -eq 128 ]]; then
+                echo 1
+            else
+                echo 0
+            fi
+            ;;
+        *)
+            echo 0
+            ;;
+    esac
+}
+isaEncOne
 # Function to set password with hidden input
 setPass() {
     local char
@@ -37,7 +107,7 @@ setPass() {
     fi
     # Store BOTH the original password and hashed version
     ssl_pass="$input_pass"
-    pass=$(echo -n "$input_pass" | md5sum | cut -d " " -f1)
+    pass=$(echo -n "$input_pass" | ${hash}sum | cut -d " " -f1)
 }
 
 # Helper functions
@@ -113,7 +183,7 @@ encrypt() {
         echo "Password not set" >&2
         return 1
     fi
-    echo -n "$pass$file" | md5sum | cut -d " " -f1
+    echo -n "$pass$file" | ${hash}sum | cut -d " " -f1
 }
 
 reverse() {
@@ -227,10 +297,10 @@ dec_ssl() {
     fi
 }
 
-# MD5 Rename Encryption - renames files to MD5 hashes
+# hash Rename Encryption - renames files to MD5 hashes
 encFile01() {
     if [[ -z $pass ]]; then
-        echo "Enter password for MD5 rename:"
+        echo "Enter password for ${hash} rename:"
         setPass || return 1
     fi
 
@@ -240,8 +310,8 @@ encFile01() {
     
     for file in "${tree[@]}"; do
         local filename=$(getFile "$file")
-        # Skip if already looks like an MD5 hash (32 chars) and doesn't have extension issues
-        if [[ ${#filename} -eq 32 || ${#filename} -eq 36 ]]; then # 36 for .ssl files (32 + 4)
+        # Skip if already looks like an hash (x chars) and doesn't have extension issues
+        if [[ ${#filename} -eq ${sizeHash} || ${#filename} -eq $((sizeHash + 4)) ]]; then # x chars for .ssl files (x + 4)
             continue
         fi
         
@@ -251,13 +321,13 @@ encFile01() {
         # If it's a .ssl file, we want to keep the .ssl extension but rename the base
         if [[ "$filename" == *.ssl ]]; then
             
-            local C_base=$(encrypt "${filename}")
-            echo "Renaming: $file -> $root/${C_base}"
-            mv "$file" "$root/${C_base}" 2>/dev/null
+            local C_base=$(encrypt "$filename")
+            echo "Renaming: $root/$filename -> $root/$C_base"
+            mv "$root/$filename" "$root/$C_base" 2>/dev/null
             ((renamed_count++))
         else
-            echo "Renaming: $file -> $root/$C_name"
-            mv "$file" "$root/$C_name" 2>/dev/null
+            echo "Renaming: $root/$filename -> $root/$C_name"
+            mv "$root/$filename" "$root/$C_name" 2>/dev/null
             ((renamed_count++))
         fi
     done
@@ -267,7 +337,7 @@ encFile01() {
 # MD5 Rename Decryption - restores original names
 decFile01() {
     if [[ -z $pass ]]; then
-        echo "Enter password for MD5 rename restoration:"
+        echo "Enter password for ${hash} rename restoration:"
         setPass || return 1
     fi
 
@@ -295,8 +365,8 @@ decFile01() {
             base_name="${current_name%.ssl}"
         fi
         
-        # Check if current name looks like an MD5 hash (32 chars)
-        if [[ ${#base_name} -eq 32 ]]; then
+        # Check if current name looks like a hash (x chars)
+        if [[ ${#base_name} -eq ${sizeHash} ]]; then
             # Try to find matching original
             for original in "${allfiles[@]}"; do
                 local orig_name=$(getFile "$original")
@@ -322,10 +392,10 @@ decFile01() {
             done
         fi
     done
-    echo "MD5 Rename restoration complete: $restored_count files restored"
+    echo "${hash} Rename restoration complete: $restored_count files restored"
 }
 
-# Folder encryption (rename to MD5)
+# Folder encryption (rename to hash)
 encFolder01() {
     if [[ -z $pass ]]; then
         echo "Enter password for folder encryption:"
@@ -338,16 +408,16 @@ encFolder01() {
     for folder_item in "${tree[@]}"; do
         local folder=$(getFile "$folder_item")
         
-        # Skip if already MD5 hash (32 chars)
-        if [[ ${#folder} -eq 32 ]]; then
+        # Skip if already  hash (x chars)
+        if [[ ${#folder} -eq ${sizeHash} ]]; then
             continue
         fi
         
         local root=$(getROOT "$folder_item")
         local C_folder=$(encrypt "${folder}/")
         
-        echo "Renaming folder: $folder_item -> $root/$C_folder"
-        mv "$folder_item" "$root/$C_folder" 2>/dev/null
+        echo "Renaming folder: $root/$folder -> $root/$C_folder"
+        mv "$root/$folder" "$root/$C_folder" 2>/dev/null
     done
 }
 
@@ -373,8 +443,8 @@ decFolder01() {
     for current_folder in "${tree[@]}"; do
         local current_name=$(getFile "$current_folder")
         
-        # Check if current name looks like an MD5 hash (32 chars)
-        if [[ ${#current_name} -eq 32 ]]; then
+        # Check if current name looks like a hash (x chars)
+        if [[ ${#current_name} -eq ${sizeHash} ]]; then
             # Try to find matching original
             for original in "${allfolders[@]}"; do
                 local orig_name=$(getFile "$original")
@@ -384,8 +454,8 @@ decFolder01() {
                     local current_path=$(getROOT "$current_folder")
                     local orig_path=$(getROOT "$original")
                     
-                    echo "Restoring folder: $current_folder -> $orig_path/$orig_name"
-                    mv "$current_folder" "$orig_path/$orig_name" 2>/dev/null
+                    echo "Restoring folder: $current_path/current_name -> $orig_path/$orig_name"
+                    mv "$current_path/current_name" "$orig_path/$orig_name" 2>/dev/null
                     if [[ $? -eq 0 ]]; then
                         ((restored_count++))
                     fi
@@ -397,38 +467,40 @@ decFolder01() {
     echo "Folder restoration complete: $restored_count folders restored"
 }
 
-# NEW: Complete encryption function (SSL FIRST, THEN MD5 rename)
+# NEW: Complete encryption function (cpt FIRST, THEN hash rename)
+
 encrypt_complete() {
+    echo ${cpt^^} \& ${hash^^}
     echo "=== COMPLETE ENCRYPTION PROCESS ==="
-    echo "Step 1: SSL Content Encryption (encrypts all file contents)"
+    echo "Step 1: ${cpt%.*} Content Encryption (encrypts all file contents)"
     echo "--------------------------------------------------------"
     enc_ssl
 
-    echo -e "\nStep 2: Update databases with new .ssl files"
+    echo -e "\nStep 2: Update databases with new ${cpt} files"
     echo "--------------------------------------------------------"
     toFile
     toFolder
     
-    echo -e "\nStep 3: MD5 Filename Encryption (renames all files to MD5 hashes)"
+    echo -e "\nStep 3: ${hash} Filename Encryption (renames all files to ${hash} hashes)"
     echo "--------------------------------------------------------"
-    #encFile01
-    #encFolder01
+    encFile01
+    encFolder01
     
     echo -e "\n=== ENCRYPTION COMPLETE ==="
     echo "All files are now:"
-    echo "  1. Content encrypted with SSL (.ssl files)"
-    echo "  2. Filenames renamed to MD5 hashes"
+    echo "  1. Content encrypted with ${cpt^^} (${cpt} files)"
+    echo "  2. Filenames renamed to ${hash} hashes"
 }
 
-# NEW: Complete decryption function (MD5 rename restore FIRST, THEN SSL decrypt)
+# NEW: Complete decryption function (hash rename restore FIRST, THEN cpt decrypt)
 decrypt_complete() {
     echo "=== COMPLETE DECRYPTION PROCESS ==="
-    echo "Step 1: MD5 Filename Restoration (restores original filenames)"
+    echo "Step 1: ${hash} Filename Restoration (restores original filenames)"
     echo "--------------------------------------------------------"
-    #decFolder01
+    decFolder01
     #decFile01
     
-    echo -e "\nStep 2: SSL Content Decryption (decrypts all .ssl file contents)"
+    echo -e "\nStep 2: ${cpt^^} Content Decryption (decrypts all ${cpt} file contents)"
     echo "--------------------------------------------------------"
     dec_ssl
     
@@ -436,8 +508,13 @@ decrypt_complete() {
     echo "All files restored to original state"
 }
 
+$*
+<<cases
 # Main script execution
 case "$1" in
+    encOne)
+    isaEncOne 
+    ;;
     encrypt|main)
         encrypt_complete
         ;;
@@ -480,3 +557,5 @@ case "$1" in
         exit 1
         ;;
 esac
+
+cases

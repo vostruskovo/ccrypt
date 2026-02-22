@@ -9,7 +9,32 @@ pathToEnc="/etc/configSslEnc_ccript.txt"
 
 # Global variables
 pass=""
-hash="md5"
+ssl_pass=""
+hash="sha512"
+sizeHash=128  # Fixed: sha512 produces 128 chars, not dynamically calculated
+cpt="ssl"  # Changed from .ssl to ssl for consistency
+sizeOfCpt=${#cpt}
+
+isaEncOne() {
+    file=$1
+    case ${hash} in
+        "md5")
+            [[ ${#file} -eq 32 ]] && echo 1 || echo 0
+            ;;
+        "sha1")
+            [[ ${#file} -eq 40 ]] && echo 1 || echo 0
+            ;;
+        "sha256")
+            [[ ${#file} -eq 64 ]] && echo 1 || echo 0
+            ;;
+        "sha512")
+            [[ ${#file} -eq 128 ]] && echo 1 || echo 0
+            ;;
+        *)
+            echo 0
+            ;;
+    esac
+}
 
 # Function to set password with hidden input
 setPass() {
@@ -35,10 +60,10 @@ setPass() {
         echo "Password cannot be empty"
         return 1
     fi
-    # Store the original password for SSL
+    # Store BOTH the original password and hashed version
     ssl_pass="$input_pass"
-    # Hash the password for MD5 rename operations
-    pass=$(echo -n "$input_pass" | md5sum | cut -d " " -f1)
+    pass=$(echo -n "$input_pass" | ${hash}sum 2>/dev/null | cut -d " " -f1)
+    return 0
 }
 
 # Helper functions
@@ -114,14 +139,14 @@ encrypt() {
         echo "Password not set" >&2
         return 1
     fi
-    echo -n "$pass$file" | md5sum | cut -d " " -f1
+    echo -n "$pass$file" | ${hash}sum 2>/dev/null | cut -d " " -f1
 }
 
 reverse() {
     local array=($*)
     local array_copy=()
     local x=$((${#array[@]} - 1))
-    for i in $(eval echo {$x..0}); do
+    for i in $(seq $x -1 0); do  # Fixed: replaced eval with seq
         array_copy+=("${array[$i]}")
     done
     echo "${array_copy[@]}"
@@ -132,17 +157,12 @@ toFolder() {
     local path="$pathToFolder"
     # Skip current directory and parent directory
     local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///') )
-    local existing=()
-    
-    if [[ -f "$path" ]]; then
-        mapfile -t existing < "$path"
-    fi
     
     # Clear the file and rewrite all folders
-    > "$path"
+    > "$path" 2>/dev/null || { echo "Cannot write to $path"; return 1; }
     for item in "${tree[@]}"; do
         if [[ -n "$item" ]]; then
-            echo "$item" >> "$path"
+            echo "$item" >> "$path" 2>/dev/null
         fi
     done
 }
@@ -150,29 +170,24 @@ toFolder() {
 toFile() {
     local path="$pathToFile"
     local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
-    local existing=()
-    
-    if [[ -f "$path" ]]; then
-        mapfile -t existing < "$path"
-    fi
     
     # Clear the file and rewrite all files
-    > "$path"
+    > "$path" 2>/dev/null || { echo "Cannot write to $path"; return 1; }
     for item in "${tree[@]}"; do
         if [[ -n "$item" ]]; then
-            echo "$item" >> "$path"
+            echo "$item" >> "$path" 2>/dev/null
         fi
     done
 }
 
-# File encryption/decryption (MD5 rename)
+# File encryption/decryption (hash rename)
 getAllEncFiles() {
     local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
     local E_files=()
     for item in "${tree[@]}"; do
         local file=$(getFile "$item")
-        # Check if it's an MD5 hash (32 chars) and not a .ssl file
-        if [[ ${#file} -eq 32 && "$file" != *.ssl ]]; then
+        # Check if filename is a hash (correct length) and not a .ssl file
+        if [[ $(isaEncOne "$file") -eq 1 && "$file" != *".ssl" ]]; then
             E_files+=("$item")
         fi
     done
@@ -184,8 +199,8 @@ getAllNoEncFiles() {
     local D_files=()
     for item in "${tree[@]}"; do
         local file=$(getFile "$item")
-        # Files that are not MD5 hashes and not .ssl files
-        if [[ ${#file} -lt 30 && "$file" != *.ssl ]]; then
+        # Files that are not hashes and not .ssl files
+        if [[ $(isaEncOne "$file") -eq 0 && "$file" != *".ssl" ]]; then
             D_files+=("$item")
         fi
     done
@@ -205,12 +220,12 @@ encFile01() {
         for target in "$@"; do
             # Remove leading ./ if present
             target="${target#./}"
-            if [[ -f "$target" ]]; then
+            if [[ -f "$target" && "$target" != *".ssl" ]]; then
                 local root=$(getROOT "$target")
                 local file=$(getFile "$target")
                 local C_file=$(encrypt "$file")
                 echo "Renaming: $target -> $root/$C_file"
-                mv "$target" "$root/$C_file"
+                mv -f "$target" "$root/$C_file"
             fi
         done
     else
@@ -220,7 +235,7 @@ encFile01() {
             local filename=$(getFile "$file")
             local C_file=$(encrypt "$filename")
             echo "Renaming: $file -> $root/$C_file"
-            mv "$file" "$root/$C_file"
+            mv -f "$file" "$root/$C_file"
         done
     fi
 }
@@ -252,7 +267,7 @@ decFile01() {
                 if [[ "$enc_filename" == "$C_orig" ]]; then
                     local path=$(getPathFromFile "$enc_file")
                     echo "Restoring: $enc_file -> $path/$orig_filename"
-                    mv "$enc_file" "$path/$orig_filename"
+                    mv -f "$enc_file" "$path/$orig_filename"
                     break
                 fi
             done
@@ -268,7 +283,7 @@ decFile01() {
                 if [[ "$enc_filename" == "$C_orig" ]]; then
                     local path=$(getPathFromFile "${E_files[$i]}")
                     echo "Restoring: ${E_files[$i]} -> $path/$orig_filename"
-                    mv "${E_files[$i]}" "$path/$orig_filename"
+                    mv -f "${E_files[$i]}" "$path/$orig_filename"
                     break
                 fi
             done
@@ -276,13 +291,13 @@ decFile01() {
     fi
 }
 
-# Folder encryption/decryption (MD5 rename)
+# Folder encryption/decryption (hash rename)
 getAllEncFolders() {
     local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///') )
     local E_folders=()
     for item in "${tree[@]}"; do
         local folder=$(getFile "$item")
-        if [[ ${#folder} -eq 32 ]]; then
+        if [[ $(isaEncOne "$folder") -eq 1 ]]; then
             E_folders+=("$item")
         fi
     done
@@ -294,7 +309,7 @@ getAllNoEncFolders() {
     local D_folders=()
     for item in "${tree[@]}"; do
         local folder=$(getFile "$item")
-        if [[ ${#folder} -lt 30 ]]; then
+        if [[ $(isaEncOne "$folder") -eq 0 ]]; then
             D_folders+=("$item")
         fi
     done
@@ -320,7 +335,7 @@ encFolder01() {
                 local C_folder=$(encrypt "${folder}/")
                 
                 echo "Renaming: $target -> $path/$C_folder"
-                mv "$target" "$path/$C_folder"
+                mv -f "$target" "$path/$C_folder"
             fi
         done
     else
@@ -341,11 +356,11 @@ encFolder01() {
             if [[ $answer == "false" ]]; then
                 local C_folder=$(encrypt "${root}/")
                 echo "Renaming: $folder_item -> $C_folder"
-                mv "$folder_item" "$C_folder" 2>/dev/null
+                mv -f "$folder_item" "$C_folder" 2>/dev/null
             else
                 local C_folder=$(encrypt "${folder}/")
                 echo "Renaming: $folder_item -> $root/$C_folder"
-                mv "$folder_item" "$root/$C_folder" 2>/dev/null
+                mv -f "$folder_item" "$root/$C_folder" 2>/dev/null
             fi
         done
     fi
@@ -378,7 +393,7 @@ decFolder01() {
                 if [[ "$enc_name" == "$C_orig" ]]; then
                     local path=$(getPathFromFile "$enc_folder")
                     echo "Restoring: $enc_folder -> $path/$orig_name"
-                    mv "$enc_folder" "$path/$orig_name" 2>/dev/null
+                    mv -f "$enc_folder" "$path/$orig_name" 2>/dev/null
                     break
                 fi
             done
@@ -395,7 +410,7 @@ decFolder01() {
                     local C_orig=$(encrypt "${allfolders[$j]}/")
                     if [[ "$C_orig" == "$enc_name" ]]; then
                         echo "Restoring: ${E_folders[$i]} -> ${allfolders[$j]}"
-                        mv "${E_folders[$i]}" "${allfolders[$j]}" 2>/dev/null
+                        mv -f "${E_folders[$i]}" "${allfolders[$j]}" 2>/dev/null
                         break
                     fi
                 else
@@ -403,7 +418,7 @@ decFolder01() {
                     if [[ "$C_orig" == "$enc_name" ]]; then
                         local path=$(getPathFromFile "${E_folders[$i]}")
                         echo "Restoring: ${E_folders[$i]} -> $path/${allfolders[$j]}"
-                        mv "${E_folders[$i]}" "$path/${allfolders[$j]}" 2>/dev/null
+                        mv -f "${E_folders[$i]}" "$path/${allfolders[$j]}" 2>/dev/null
                         break
                     fi
                 fi
@@ -415,25 +430,24 @@ decFolder01() {
 # SSL/OpenSSL functions
 gen_ssl03() {
     local key=$(openssl rand -hex 64)
-    echo "$key" >> "$pathToSsl"
+    echo "$key" >> "$pathToSsl" 2>/dev/null
     echo "$key"
 }
 
 gen_ssl02() {
     local bits=256
     local sslPass=$(openssl enc -aes-${bits}-cbc -k "$1" -P -md sha1 2>/dev/null | grep key | cut -d "=" -f2)
-    echo "$sslPass" >> "$pathToGen"
+    echo "$sslPass" >> "$pathToGen" 2>/dev/null
     echo "$sslPass"
 }
 
 gen_ssl() {
     local bits=256
     local passSSL=$(echo "pass" | openssl enc -aes-256-ecb -e -a -K "$1" 2>/dev/null)
-    echo "$passSSL" >> "$pathToEnc"
+    echo "$passSSL" >> "$pathToEnc" 2>/dev/null
     echo "$passSSL"
 }
 
-# FIXED: SSL Encryption - NOW ENCRYPTS ALL FILES
 enc_ssl() {
     if [[ -z $ssl_pass ]]; then
         echo "Enter password for SSL encryption:"
@@ -447,8 +461,8 @@ enc_ssl() {
     local encrypted_count=0
     
     for item in "${tree[@]}"; do
-        # Skip .ssl files (already encrypted)
-        if [[ "$item" != *.ssl ]]; then
+        # Skip .ssl files (already encrypted) and config files
+        if [[ "$item" != *.ssl && "$item" != *"_ccript.txt" ]]; then
             files+=("$item")
         fi
     done
@@ -476,7 +490,6 @@ enc_ssl() {
     fi
 }
 
-# FIXED: SSL Decryption
 dec_ssl() {
     if [[ -z $ssl_pass ]]; then
         echo "Enter password for SSL decryption:"
@@ -524,46 +537,43 @@ dec_ssl() {
     echo "SSL Decryption complete: $decrypted_count files decrypted"
 }
 
-# NEW: Combined encryption function that does MD5 rename + SSL
+# Combined encryption function
 encrypt_all() {
-    echo "=== COMPLETE FILE ENCRYPTION (MD5 Rename + SSL) ==="
+    echo "=== COMPLETE FILE ENCRYPTION (${hash^^} Rename + ${cpt^^}) ==="
     
     # Update databases
     toFile
     toFolder
     
-    # Step 1: MD5 rename encryption
-    echo -e "\n=== Step 1: MD5 Rename Encryption ==="
+    # Step 1: hash rename encryption
+    echo -e "\n=== Step 1: ${hash} Rename Encryption ==="
     encFile01
     
-    # Step 2: SSL content encryption (on ALL files, including MD5 renamed ones)
-    echo -e "\n=== Step 2: SSL Content Encryption ==="
+    # Step 2: cpt content encryption
+    echo -e "\n=== Step 2: ${cpt^^} Content Encryption ==="
     enc_ssl
-    
+    encFolder01
     echo -e "\n=== ENCRYPTION COMPLETE ==="
-    echo "All files are now:"
-    echo "  1. Renamed to MD5 hashes"
-    echo "  2. Content encrypted with SSL (.ssl extension)"
 }
 
-# NEW: Combined decryption function
+# Combined decryption function
 decrypt_all() {
-    echo "=== COMPLETE FILE DECRYPTION (SSL + MD5 Rename) ==="
+    echo "=== COMPLETE FILE DECRYPTION (${cpt^^} + ${hash} Rename) ==="
     
-    # Step 1: SSL content decryption (reverse order)
-    echo -e "\n=== Step 1: SSL Content Decryption ==="
+    # Step 1: cpt content decryption
+    echo -e "\n=== Step 1: ${cpt^^} Content Decryption ==="
     dec_ssl
     
-    # Update databases after SSL decryption
+    # Update databases after cpt decryption
     toFile
     toFolder
     
-    # Step 2: MD5 rename decryption
-    echo -e "\n=== Step 2: MD5 Rename Decryption ==="
+    # Step 2: hash rename decryption
+    echo -e "\n=== Step 2: ${hash} Rename Decryption ==="
     decFile01
     
-    # Step 3: Folder MD5 rename decryption
-    echo -e "\n=== Step 3: Folder MD5 Rename Decryption ==="
+    # Step 3: Folder hash rename decryption
+    echo -e "\n=== Step 3: Folder ${hash} Rename Decryption ==="
     decFolder01
     
     echo -e "\n=== DECRYPTION COMPLETE ==="
@@ -602,14 +612,14 @@ case "$1" in
     help|--help|-h)
         echo "Usage: $0 [encrypt|decrypt|encfile|decfile|encfolder|decfolder|encssl|decssl]"
         echo ""
-        echo "  encrypt   - COMPLETE ENCRYPTION: MD5 rename ALL files + SSL encrypt ALL files"
-        echo "  decrypt   - COMPLETE DECRYPTION: SSL decrypt ALL files + MD5 rename restore ALL files"
-        echo "  encfile   - Encrypt specific files with MD5 rename only (provide paths)"
-        echo "  decfile   - Decrypt specific files from MD5 rename only (provide paths)"
-        echo "  encfolder - Encrypt specific folders with MD5 rename only (provide paths)"
-        echo "  decfolder - Decrypt specific folders from MD5 rename only (provide paths)"
-        echo "  encssl    - SSL encrypt ALL files (content encryption)"
-        echo "  decssl    - SSL decrypt ALL .ssl files"
+        echo "  encrypt   - COMPLETE ENCRYPTION: ${hash^^} rename ALL files + ${cpt^^} encrypt ALL files"
+        echo "  decrypt   - COMPLETE DECRYPTION: ${cpt^^} decrypt ALL files + ${hash^^} rename restore ALL files"
+        echo "  encfile   - Encrypt specific files with ${hash^^} rename only (provide paths)"
+        echo "  decfile   - Decrypt specific files from ${hash^^} rename only (provide paths)"
+        echo "  encfolder - Encrypt specific folders with ${hash^^} rename only (provide paths)"
+        echo "  decfolder - Decrypt specific folders from ${hash^^} rename only (provide paths)"
+        echo "  encssl    - ${cpt^^} encrypt ALL files (content encryption)"
+        echo "  decssl    - ${cpt^^} decrypt ALL .${cpt} files"
         ;;
     *)
         if [[ -z $1 ]]; then

@@ -221,16 +221,93 @@ getAllNoEncFiles() {
         local file=$(getFile "$item")
         # Files that are not hashes and not .ssl files
         if [[ $(isaEncOne "$file") -eq 0 && "$file" != *.ssl ]]; then
-            D_files+=("$item")
+            # Also check if this file might be an already encrypted file from previous run
+            if [[ -f "$pathToFile" ]]; then
+                local is_in_db=0
+                while IFS= read -r db_item; do
+                    local db_file=$(getFile "$db_item")
+                    local db_hash=$(encrypt "$db_file" 2>/dev/null || echo "")
+                    if [[ "$file" == "$db_hash" ]]; then
+                        is_in_db=1
+                        break
+                    fi
+                done < "$pathToFile"
+                
+                # If not in database as a hash, add to unencrypted list
+                if [[ $is_in_db -eq 0 ]]; then
+                    D_files+=("$item")
+                fi
+            else
+                # No database, just check if it looks like a hash
+                D_files+=("$item")
+            fi
         fi
     done
     echo "${D_files[@]}"
+}
+
+# Folder encryption/decryption (hash rename)
+getAllEncFolders() {
+    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///') )
+    local E_folders=()
+    for item in "${tree[@]}"; do
+        local folder=$(getFile "$item")
+        # Check if folder name length matches hash length
+        if [[ $(isaEncOne "$folder") -eq 1 ]]; then
+            E_folders+=("$item")
+        fi
+    done
+    echo "${E_folders[@]}"
+}
+
+getAllNoEncFolders() {
+    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///') )
+    local D_folders=()
+    for item in "${tree[@]}"; do
+        local folder=$(getFile "$item")
+        # Check if folder name is NOT a hash
+        if [[ $(isaEncOne "$folder") -eq 0 ]]; then
+            # Also check if this folder might be an already encrypted folder from previous run
+            if [[ -f "$pathToFolder" ]]; then
+                local is_in_db=0
+                while IFS= read -r db_item; do
+                    local db_folder=$(getFile "$db_item")
+                    local db_hash=$(encrypt "${db_folder}/" 2>/dev/null || echo "")
+                    if [[ "$folder" == "$db_hash" ]]; then
+                        is_in_db=1
+                        break
+                    fi
+                done < "$pathToFolder"
+                
+                # If not in database as a hash, add to unencrypted list
+                if [[ $is_in_db -eq 0 ]]; then
+                    D_folders+=("$item")
+                fi
+            else
+                D_folders+=("$item")
+            fi
+        fi
+    done
+    echo "${D_folders[@]}"
 }
 
 encFile01() {
     if [[ -z $pass ]]; then
         echo "Enter password for file encryption (hash rename):"
         setPass || return 1
+    fi
+
+    # Check if files are already encrypted by looking at the database
+    if [[ -f "$pathToFile" ]]; then
+        local existing_enc=($(getAllEncFiles))
+        if [[ ${#existing_enc[@]} -gt 0 && $# -eq 0 ]]; then
+            echo "Warning: Found ${#existing_enc[@]} already encrypted files!"
+            echo "To avoid double encryption, decrypt first or use specific file paths."
+            read -p "Continue anyway? (y/N): " confirm
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                return 1
+            fi
+        fi
     fi
 
     local files=($(getAllNoEncFiles))
@@ -311,37 +388,23 @@ decFile01() {
     fi
 }
 
-# Folder encryption/decryption (hash rename)
-getAllEncFolders() {
-    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///') )
-    local E_folders=()
-    for item in "${tree[@]}"; do
-        local folder=$(getFile "$item")
-        # Check if folder name length matches hash length
-        if [[ $(isaEncOne "$folder") -eq 1 ]]; then
-            E_folders+=("$item")
-        fi
-    done
-    echo "${E_folders[@]}"
-}
-
-getAllNoEncFolders() {
-    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///') )
-    local D_folders=()
-    for item in "${tree[@]}"; do
-        local folder=$(getFile "$item")
-        # Check if folder name is NOT a hash
-        if [[ $(isaEncOne "$folder") -eq 0 ]]; then
-            D_folders+=("$item")
-        fi
-    done
-    echo "${D_folders[@]}"
-}
-
 encFolder01() {
     if [[ -z $pass ]]; then
         echo "Enter password for folder encryption (hash rename):"
         setPass || return 1
+    fi
+
+    # Check if folders are already encrypted
+    if [[ -f "$pathToFolder" ]]; then
+        local existing_enc=($(getAllEncFolders))
+        if [[ ${#existing_enc[@]} -gt 0 && $# -eq 0 ]]; then
+            echo "Warning: Found ${#existing_enc[@]} already encrypted folders!"
+            echo "To avoid double encryption, decrypt first or use specific folder paths."
+            read -p "Continue anyway? (y/N): " confirm
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                return 1
+            fi
+        fi
     fi
 
     local D_folders=($(getAllNoEncFolders))
@@ -579,6 +642,26 @@ dec_ssl() {
 
 encrypt_all() {
     echo "=== COMPLETE FILE ENCRYPTION (${hash^^} Rename + ${cpt^^}) ==="
+    
+    # Check if already encrypted
+    local existing_files=($(getAllEncFiles))
+    local existing_folders=($(getAllEncFolders))
+    local existing_ssl=$(find . -name "*.ssl" -type f 2>/dev/null | wc -l)
+    
+    if [[ ${#existing_files[@]} -gt 0 || ${#existing_folders[@]} -gt 0 || $existing_ssl -gt 0 ]]; then
+        echo "WARNING: Found existing encrypted items:"
+        [[ ${#existing_files[@]} -gt 0 ]] && echo "  - ${#existing_files[@]} hash-encrypted files"
+        [[ ${#existing_folders[@]} -gt 0 ]] && echo "  - ${#existing_folders[@]} hash-encrypted folders"
+        [[ $existing_ssl -gt 0 ]] && echo "  - $existing_ssl SSL-encrypted files"
+        echo ""
+        echo "Running encryption again will DOUBLE-ENCRYPT these items, making them impossible to recover!"
+        echo "You should run 'decrypt' first to restore original names."
+        read -p "Are you ABSOLUTELY SURE you want to continue? (Type 'YES' to confirm): " confirm
+        if [[ "$confirm" != "YES" ]]; then
+            echo "Encryption cancelled."
+            return 1
+        fi
+    fi
     
     # Update databases
     toFile

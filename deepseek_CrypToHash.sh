@@ -1,91 +1,52 @@
 #!/bin/bash
 
-# Configuration paths
-pathToFolder="/etc/configFolder_ccript.txt"
-pathToFile="/etc/configFile_ccript.txt"
-pathToSsl="/etc/configSsl_ccript.txt"
-pathToGen="/etc/configSslGen_ccript.txt"
-pathToEnc="/etc/configSslEnc_ccript.txt"
+# Configuration paths - stores database files for folder/file listings
+# Use absolute paths that won't be affected by encryption
+CONFIG_DIR="/etc/cryptoconfig"
+pathToFolder="$CONFIG_DIR/folders.txt"
+pathToFile="$CONFIG_DIR/files.txt"
+pathToSsl="$CONFIG_DIR/ssl_pass.txt"  # Store SSL password hash
+pathToGen="$CONFIG_DIR/gen.txt"
+pathToEnc="$CONFIG_DIR/enc.txt"
+
+# Create config directory if it doesn't exist
+mkdir -p "$CONFIG_DIR"
 
 # Global variables
-pass=""
-hash="sha512"
-sizeHash=$(echo -n ${hash} | ${hash}sum | wc -c)
-cpt=.ssl
-sizeOfCpt=${#cpt}
-
-#<<isaEncOne
+pass=""        # Stores hashed password for hash-based renaming operations
+ssl_pass_hash="" # Stores hashed SSL password for verification
+hash="sha256"     # Current hash algorithm being used (md5, sha1, sha256, sha512)
+operation_mode="" # Track current operation mode
+cpt="ssl"
+# Function to check if a string matches the current hash algorithm's length
 isaEncOne() {
-    file=$1
+    local name="$1"
     case ${hash} in
         "md5")
-        if [[ ${#1} -eq 32 ]]; then
-            echo 1
-        else
-            echo 0
-        fi
-;;
+            [[ ${#name} -eq 32 ]] && echo 1 || echo 0
+            ;;
         "sha1")
-        [[ ${#1} -eq 40  ]] && echo 1 || echo 0 
-;;
+            [[ ${#name} -eq 40 ]] && echo 1 || echo 0
+            ;;
         "sha256")
-        echo $(( ${#1} == 64 ? 1 : 0 ))
-;;
+            [[ ${#name} -eq 64 ]] && echo 1 || echo 0
+            ;;
         "sha512")
-        if (( ${#1} == 128 )); then
-            echo 1
-        else
-            echo 0
-        fi        
-;;
-    esac
-
-}
-#isaEncOne
-
-
-<<isaEncOne
-isaEncOne() {
-    case "$hash" in
-        md5)
-            if [[ ${#1} -eq 32 ]]; then
-                echo 1
-            else
-                echo 0
-            fi
-            ;;
-        sha1)
-            if [[ ${#1} -eq 40 ]]; then
-                echo 1
-            else
-                echo 0
-            fi
-            ;;
-        sha256)
-            if [[ ${#1} -eq 64 ]]; then
-                echo 1
-            else
-                echo 0
-            fi
-            ;;
-        sha512)
-            if [[ ${#1} -eq 128 ]]; then
-                echo 1
-            else
-                echo 0
-            fi
+            [[ ${#name} -eq 128 ]] && echo 1 || echo 0
             ;;
         *)
             echo 0
             ;;
     esac
 }
-isaEncOne
+
 # Function to set password with hidden input
 setPass() {
     local char
     local input_pass=""
-    printf "Enter password: "
+    local purpose="$1"  # "hash" or "ssl"
+    
+    printf "Enter ${purpose} password: "
     while IFS= read -r -s -n1 char; do
         if [[ $char = "" ]]; then
             printf "\n"
@@ -101,44 +62,46 @@ setPass() {
         fi
     done
     echo
+    
     if [[ -z $input_pass ]]; then
         echo "Password cannot be empty"
         return 1
     fi
-    # Store BOTH the original password and hashed version
-    ssl_pass="$input_pass"
-    pass=$(echo -n "$input_pass" | ${hash}sum | cut -d " " -f1)
+    
+    # Store based on purpose
+    if [[ "$purpose" == "ssl" ]]; then
+        # For SSL, store both plain for immediate use and hash for verification
+        ssl_pass_plain="$input_pass"
+        ssl_pass_hash=$(echo -n "$input_pass" | sha256sum | cut -d " " -f1)
+        # Save SSL password hash for verification during decryption
+        echo "$ssl_pass_hash" > "$pathToSsl"
+    else
+        # For hash-based renaming
+        ssl_pass_plain=""  # Clear SSL password when setting hash password
+        pass=$(echo -n "$input_pass" | ${hash}sum | cut -d " " -f1)
+    fi
 }
 
-# Helper functions
+# Verify SSL password against stored hash
+verify_ssl_pass() {
+    if [[ ! -f "$pathToSsl" ]]; then
+        echo "No SSL password record found. Did you encrypt with this tool?"
+        return 1
+    fi
+    
+    local stored_hash=$(cat "$pathToSsl")
+    local input_hash=$(echo -n "$ssl_pass_plain" | sha256sum | cut -d " " -f1)
+    
+    if [[ "$input_hash" != "$stored_hash" ]]; then
+        echo "Incorrect SSL password!"
+        return 1
+    fi
+    return 0
+}
+
+# Helper functions for path manipulation
 getHowmanySlashes() {
     echo "$1" | grep -o "/" | wc -l
-}
-
-getPath() {
-    local howmanySlashes=$(getHowmanySlashes "$1")
-    if [[ $howmanySlashes -eq 0 ]]; then
-        echo "."
-    else
-        echo "$1" | cut -d "/" -f1-$((howmanySlashes + 1))
-    fi
-}
-
-getPathFromFile() {
-    local howmanySlashes=$(getHowmanySlashes "$1")
-    if [[ -f "$1" ]]; then
-        if [[ $howmanySlashes -eq 0 ]]; then
-            echo "."
-        else
-            echo "$1" | cut -d "/" -f1-$((howmanySlashes))
-        fi
-    else
-        if [[ $howmanySlashes -eq 0 ]]; then
-            echo "."
-        else
-            echo "$1" | cut -d "/" -f1-$((howmanySlashes + 1))
-        fi
-    fi
 }
 
 getROOT() {
@@ -159,85 +122,54 @@ getFile() {
     fi
 }
 
-getFolder() {
-    local howmanySlashes=$(getHowmanySlashes "$1")
-    if [[ $howmanySlashes -eq 0 ]]; then
-        echo "$1"
-    else
-        echo "$1" | cut -d "/" -f$((howmanySlashes + 1))
-    fi
-}
-
-validatin() {
-    local file=$(getFile "$1")
-    if [[ -n "$file" && "$file" != "." && "$file" != ".." ]]; then
-        echo "true"
-    else
-        echo "false"
-    fi
-}
-
+# Core hash function for renaming
 encrypt() {
     local file="$1"
     if [[ -z $pass ]]; then
-        echo "Password not set" >&2
+        echo "Hash password not set" >&2
         return 1
     fi
     echo -n "$pass$file" | ${hash}sum | cut -d " " -f1
 }
 
-reverse() {
-    local array=($*)
-    local array_copy=()
-    local x=$((${#array[@]} - 1))
-    for i in $(eval echo {$x..0}); do
-        array_copy+=("${array[$i]}")
-    done
-    echo "${array_copy[@]}"
-}
-
-# Database maintenance functions
-toFolder() {
-    local path="$pathToFolder"
-    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///') )
+# Database maintenance functions - using absolute paths that won't be affected
+saveDatabases() {
+    # Save current file structure BEFORE any encryption
+    echo "Saving directory structure to database..."
+    > "$pathToFolder"
+    > "$pathToFile"
     
-    # Clear and rewrite the file
-    > "$path"
-    for item in "${tree[@]}"; do
-        if [[ -n "$item" ]]; then
-            echo "$item" >> "$path"
+    # Save all directories
+    find . -type d ! -path "." 2>/dev/null | sed 's/^\.\///' | while read -r item; do
+        if [[ -n "$item" && "$item" != "." && "$item" != ".." ]]; then
+            echo "$item" >> "$pathToFolder"
         fi
     done
-}
-
-toFile() {
-    local path="$pathToFile"
-    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
     
-    # Clear and rewrite the file
-    > "$path"
-    for item in "${tree[@]}"; do
+    # Save all files
+    find . -type f 2>/dev/null | sed 's/^\.\///' | while read -r item; do
         if [[ -n "$item" ]]; then
-            echo "$item" >> "$path"
+            echo "$item" >> "$pathToFile"
         fi
     done
+    
+    echo "Database saved: $(wc -l < "$pathToFile") files, $(wc -l < "$pathToFolder") folders"
 }
 
-# SSL Encryption FIRST - encrypts ALL file contents
+# SSL Encryption
 enc_ssl() {
-    if [[ -z $ssl_pass ]]; then
-        echo "Enter password for SSL encryption:"
-        setPass || return 1
+    if [[ -z $ssl_pass_plain ]]; then
+        setPass "ssl" || return 1
     fi
     
     local bits=256
-    # Find ALL files that are not already .ssl files
     local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
     local files=()
     local encrypted_count=0
     
+    # Filter out .ssl files and config files
     for item in "${tree[@]}"; do
-        if [[ "$item" != *.ssl ]]; then
+        if [[ "$item" != *.ssl && "$item" != "$CONFIG_DIR"* ]]; then
             files+=("$item")
         fi
     done
@@ -248,9 +180,7 @@ enc_ssl() {
         for file in "${files[@]}"; do
             if [[ -f "$file" ]]; then
                 echo "SSL Encrypting: $file"
-                # Create encrypted file with .ssl extension
-                if openssl enc -aes-${bits}-cbc -salt -in "$file" -out "${file}.ssl" -k "$ssl_pass" 2>/dev/null; then
-                    # Remove original file after successful encryption
+                if openssl enc -aes-${bits}-cbc -salt -in "$file" -out "${file}.ssl" -k "$ssl_pass_plain" 2>/dev/null; then
                     rm "$file"
                     echo "  -> ${file}.ssl"
                     ((encrypted_count++))
@@ -267,78 +197,76 @@ enc_ssl() {
 
 # SSL Decryption
 dec_ssl() {
-    if [[ -z $ssl_pass ]]; then
-        echo "Enter password for SSL decryption:"
-        setPass || return 1
+    if [[ -z $ssl_pass_plain ]]; then
+        setPass "ssl" || return 1
     fi
+    
+    # Verify password against stored hash
+    verify_ssl_pass || return 1
     
     local bits=256
-    # Find all .ssl files recursively
-    local ssl_files=( $(find . -name "*.ssl" -type f 2>/dev/null | sed 's/^\.\///') )
+    local tree=( $(find . -name "*.ssl" -type f 2>/dev/null | sed 's/^\.\///') )
     local decrypted_count=0
     
-    echo "Found ${#ssl_files[@]} SSL files to decrypt"
+    echo "Found ${#tree[@]} SSL files to decrypt"
     
-    if [[ ${#ssl_files[@]} -gt 0 ]]; then
-        for file in "${ssl_files[@]}"; do
-            local output="${file%.ssl}"
-            echo "Decrypting: $file -> $output"
-            if openssl enc -d -aes-${bits}-cbc -in "$file" -out "$output" -k "$ssl_pass" 2>/dev/null; then
-                rm "$file"
-                echo "  ✓ Decrypted: $file"
-                ((decrypted_count++))
-            else
-                echo "  ✗ Failed to decrypt: $file (wrong password or corrupted file?)"
-            fi
-        done
-        echo "SSL Decryption complete: $decrypted_count files decrypted"
-    else
-        echo "No .ssl files found to decrypt"
-    fi
+    for file in "${tree[@]}"; do
+        local output="${file%.ssl}"
+        echo "Decrypting: $file -> $output"
+        if openssl enc -d -aes-256-cbc -in "$file" -out "$output" -k "$ssl_pass_plain" 2>/dev/null; then
+            rm "$file"
+            echo "  Decrypted: $file"
+            ((decrypted_count++))
+        else
+            echo "  Failed to decrypt: $file (wrong password?)"
+        fi
+    done
+    echo "SSL Decryption complete: $decrypted_count files decrypted"
 }
 
-# hash Rename Encryption - renames files to MD5 hashes
+# Hash-based Filename Encryption
 encFile01() {
     if [[ -z $pass ]]; then
-        echo "Enter password for ${hash} rename:"
-        setPass || return 1
+        setPass "hash" || return 1
     fi
 
-    # Find ALL files (including .ssl files now)
-    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
+    local tree=( $(find . -type f 2>/dev/null | grep -v "^\./$(basename "$CONFIG_DIR")" | sed 's/^\.\///') )
     local renamed_count=0
     
     for file in "${tree[@]}"; do
         local filename=$(getFile "$file")
-        # Skip if already looks like an hash (x chars) and doesn't have extension issues
-        if [[ ${#filename} -eq ${sizeHash} || ${#filename} -eq $((sizeHash + 4)) ]]; then # x chars for .ssl files (x + 4)
-            continue
-        fi
         
-        local root=$(getROOT "$file")
-        local C_name=$(encrypt "$filename")
-        
-        # If it's a .ssl file, we want to keep the .ssl extension but rename the base
-        if [[ "$filename" == *.ssl ]]; then
-            
-            local C_base=$(encrypt "$filename")
-            echo "Renaming: $root/$filename -> $root/$C_base"
-            mv "$root/$filename" "$root/$C_base" 2>/dev/null
+        # Check if it's a .ssl file
+        if [[ "$file" == *.ssl ]]; then
+            local base="${filename%.ssl}"
+            # Skip if already hashed
+            if [[ $(isaEncOne ${base}) == 1 ]]; then
+                continue
+            fi
+            local root=$(getROOT "$file")
+            local C_base=$(encrypt "$base")
+            echo "Renaming: $file -> $root/${C_base}.ssl"
+            mv "$file" "$root/${C_base}.ssl" 2>/dev/null
             ((renamed_count++))
         else
-            echo "Renaming: $root/$filename -> $root/$C_name"
-            mv "$root/$filename" "$root/$C_name" 2>/dev/null
+            # Regular file
+            if [[ $(isaEncOne ${filename}) == 1 ]]; then
+                continue
+            fi
+            local root=$(getROOT "$file")
+            local C_name=$(encrypt "$filename")
+            echo "Renaming: $file -> $root/$C_name"
+            mv "$file" "$root/$C_name" 2>/dev/null
             ((renamed_count++))
         fi
     done
-    echo "MD5 Rename complete: $renamed_count files renamed"
+    echo "Hash-based Rename complete: $renamed_count files renamed"
 }
 
-# MD5 Rename Decryption - restores original names
+# Hash-based Filename Decryption
 decFile01() {
     if [[ -z $pass ]]; then
-        echo "Enter password for ${hash} rename restoration:"
-        setPass || return 1
+        setPass "hash" || return 1
     fi
 
     if [[ ! -f "$pathToFile" ]]; then
@@ -346,18 +274,20 @@ decFile01() {
         return 1
     fi
     
-    local allfiles=($(cat "$pathToFile"))
-    # Find all files recursively, excluding directories
-    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
-    local restored_count=0
+    # Read original names from database
+    local allfiles=()
+    while IFS= read -r line; do
+        allfiles+=("$line")
+    done < "$pathToFile"
     
-    echo "Found ${#tree[@]} files to process for name restoration"
+    local tree=( $(find . -type f 2>/dev/null | grep -v "^\./$(basename "$CONFIG_DIR")" | sed 's/^\.\///') )
+    local restored_count=0
     
     for current_file in "${tree[@]}"; do
         local current_name=$(getFile "$current_file")
         local current_path=$(getROOT "$current_file")
         
-        # Handle .ssl files specially
+        # Handle .ssl files
         local is_ssl=false
         local base_name="$current_name"
         if [[ "$current_name" == *.ssl ]]; then
@@ -365,26 +295,38 @@ decFile01() {
             base_name="${current_name%.ssl}"
         fi
         
-        # Check if current name looks like a hash (x chars)
-        if [[ ${#base_name} -eq ${sizeHash} ]]; then
+        # Check if current name looks like a hash
+        if [[ $(isaEncOne ${base_name}) == 1 ]]; then
             # Try to find matching original
             for original in "${allfiles[@]}"; do
                 local orig_name=$(getFile "$original")
+                local orig_path=$(getROOT "$original")
                 local C_orig=$(encrypt "$orig_name")
                 
                 if [[ "$base_name" == "$C_orig" ]]; then
-                    local orig_path=$(getROOT "$original")
-                    # Create destination directory if it doesn't exist
-                    if [[ "$orig_path" != "." ]]; then
-                        mkdir -p "$orig_path" 2>/dev/null
-                    fi
-                    
                     if [[ "$is_ssl" == true ]]; then
-                        echo "Restoring: $current_file -> $orig_path/${orig_name}.ssl"
-                        mv "$current_file" "$orig_path/${orig_name}.ssl" 2>/dev/null
+                        # For .ssl files, keep the .ssl extension
+                        local target_name="${orig_name}.ssl"
+                        local target_path="$orig_path"
+                        
+                        # Create directory if needed
+                        if [[ "$current_path" != "$target_path" ]]; then
+                            mkdir -p "$target_path"
+                        fi
+                        
+                        echo "Restoring: $current_file -> $target_path/$target_name"
+                        mv "$current_file" "$target_path/$target_name" 2>/dev/null
                     else
-                        echo "Restoring: $current_file -> $orig_path/$orig_name"
-                        mv "$current_file" "$orig_path/$orig_name" 2>/dev/null
+                        # Regular file
+                        local target_path="$orig_path"
+                        
+                        # Create directory if needed
+                        if [[ "$current_path" != "$target_path" ]]; then
+                            mkdir -p "$target_path"
+                        fi
+                        
+                        echo "Restoring: $current_file -> $target_path/$orig_name"
+                        mv "$current_file" "$target_path/$orig_name" 2>/dev/null
                     fi
                     ((restored_count++))
                     break
@@ -392,40 +334,38 @@ decFile01() {
             done
         fi
     done
-    echo "${hash} Rename restoration complete: $restored_count files restored"
+    echo "Hash-based Name restoration complete: $restored_count files restored"
 }
 
-# Folder encryption (rename to hash)
+# Folder encryption
 encFolder01() {
     if [[ -z $pass ]]; then
-        echo "Enter password for folder encryption:"
-        setPass || return 1
+        setPass "hash" || return 1
     fi
 
     # Get all directories (deepest first)
-    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///' | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-) )
+    local tree=( $(find . -type d ! -path "." 2>/dev/null | grep -v "^\./$(basename "$CONFIG_DIR")" | sed 's/^\.\///' | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-) )
     
     for folder_item in "${tree[@]}"; do
         local folder=$(getFile "$folder_item")
         
-        # Skip if already  hash (x chars)
-        if [[ ${#folder} -eq ${sizeHash} ]]; then
+        # Skip if already hashed
+        if [[ $(isaEncOne ${folder}) == 1 ]]; then
             continue
         fi
         
         local root=$(getROOT "$folder_item")
         local C_folder=$(encrypt "${folder}/")
         
-        echo "Renaming folder: $root/$folder -> $root/$C_folder"
-        mv "$root/$folder" "$root/$C_folder" 2>/dev/null
+        echo "Renaming folder: $folder_item -> $root/$C_folder"
+        mv "$folder_item" "$root/$C_folder" 2>/dev/null
     done
 }
 
 # Folder decryption
 decFolder01() {
     if [[ -z $pass ]]; then
-        echo "Enter password for folder decryption:"
-        setPass || return 1
+        setPass "hash" || return 1
     fi
 
     if [[ ! -f "$pathToFolder" ]]; then
@@ -433,74 +373,130 @@ decFolder01() {
         return 1
     fi
 
-    local allfolders=($(cat "$pathToFolder"))
-    # Get all directories (deepest first for proper hierarchy)
-    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///' | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-) )
-    local restored_count=0
+    local allfolders=()
+    while IFS= read -r line; do
+        allfolders+=("$line")
+    done < "$pathToFolder"
     
-    echo "Found ${#tree[@]} folders to process for name restoration"
+    # Get all directories (deepest first)
+    local tree=( $(find . -type d ! -path "." 2>/dev/null | grep -v "^\./$(basename "$CONFIG_DIR")" | sed 's/^\.\///' | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-) )
     
     for current_folder in "${tree[@]}"; do
         local current_name=$(getFile "$current_folder")
+        local current_path=$(getROOT "$current_folder")
         
-        # Check if current name looks like a hash (x chars)
-        if [[ ${#current_name} -eq ${sizeHash} ]]; then
+        # Check if current name looks like a hash
+        if [[ $(isaEncOne ${current_name}) == 1 ]]; then
             # Try to find matching original
             for original in "${allfolders[@]}"; do
                 local orig_name=$(getFile "$original")
+                local orig_path=$(getROOT "$original")
                 local C_orig=$(encrypt "${orig_name}/")
                 
                 if [[ "$current_name" == "$C_orig" ]]; then
-                    local current_path=$(getROOT "$current_folder")
-                    local orig_path=$(getROOT "$original")
-                    
-                    echo "Restoring folder: $current_path/current_name -> $orig_path/$orig_name"
-                    mv "$current_path/current_name" "$orig_path/$orig_name" 2>/dev/null
-                    if [[ $? -eq 0 ]]; then
-                        ((restored_count++))
+                    # Create target directory if needed
+                    if [[ "$current_path" != "$orig_path" ]]; then
+                        mkdir -p "$orig_path"
                     fi
+                    
+                    echo "Restoring folder: $current_folder -> $orig_path/$orig_name"
+                    mv "$current_folder" "$orig_path/$orig_name" 2>/dev/null
                     break
                 fi
             done
         fi
     done
-    echo "Folder restoration complete: $restored_count folders restored"
 }
 
-# NEW: Complete encryption function (cpt FIRST, THEN hash rename)
-
+# COMPLETE ENCRYPTION
 encrypt_complete() {
-    echo ${cpt^^} \& ${hash^^}
-    echo "=== COMPLETE ENCRYPTION PROCESS ==="
-    echo "Step 1: ${cpt%.*} Content Encryption (encrypts all file contents)"
+    echo "=== COMPLETE ENCRYPTION PROCESS === ${hash^^} \& ${cpt^^}"
+    echo "Step 1: Save database of original names"
+    echo "--------------------------------------------------------"
+    saveDatabases
+    
+    echo -e "\nStep 2: SSL Content Encryption"
     echo "--------------------------------------------------------"
     enc_ssl
-
-    echo -e "\nStep 2: Update databases with new ${cpt} files"
-    echo "--------------------------------------------------------"
-    toFile
-    toFolder
     
-    echo -e "\nStep 3: ${hash} Filename Encryption (renames all files to ${hash} hashes)"
+    echo -e "\nStep 3: Hash-based Filename Encryption"
     echo "--------------------------------------------------------"
     encFile01
     encFolder01
     
     echo -e "\n=== ENCRYPTION COMPLETE ==="
-    echo "All files are now:"
-    echo "  1. Content encrypted with ${cpt^^} (${cpt} files)"
-    echo "  2. Filenames renamed to ${hash} hashes"
+    echo "All files encrypted. To decrypt, use: $0 decrypt"
+    echo "Database saved in: $CONFIG_DIR"
 }
 
-# NEW: Complete decryption function (hash rename restore FIRST, THEN cpt decrypt)
+
+# Function to remove empty folders recursively
+remove_empty_folders() {
+    echo "=== REMOVING EMPTY FOLDERS RECURSIVELY ==="
+    
+    local removed_count=0
+    local pass_count=0
+    local max_passes=10  # Prevent infinite loops
+    
+    echo "Scanning for empty folders..."
+    
+    # Keep scanning until no more empty folders are found
+    while [[ $pass_count -lt $max_passes ]]; do
+        local found_empty=0
+        
+        # Find all directories (deepest first) that are empty
+        # Using -empty flag to find empty directories
+        while IFS= read -r dir; do
+            if [[ -d "$dir" ]]; then
+                # Check if directory is empty (no files, no subdirectories)
+                if [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+                    echo "Removing empty folder: $dir"
+                    rmdir "$dir" 2>/dev/null
+                    if [[ $? -eq 0 ]]; then
+                        ((removed_count++))
+                        ((found_empty++))
+                    fi
+                fi
+            fi
+        done < <(find . -type d 2>/dev/null | sort -r)  # Reverse sort to process deepest first
+        
+        # If no empty folders found in this pass, we're done
+        if [[ $found_empty -eq 0 ]]; then
+            break
+        fi
+        
+        ((pass_count++))
+    done
+    
+    if [[ $removed_count -gt 0 ]]; then
+        echo "Removed $removed_count empty folders"
+    else
+        echo "No empty folders found"
+    fi
+    
+    return 0
+}
+
+
+# COMPLETE DECRYPTION
 decrypt_complete() {
     echo "=== COMPLETE DECRYPTION PROCESS ==="
-    echo "Step 1: ${hash} Filename Restoration (restores original filenames)"
-    echo "--------------------------------------------------------"
-    decFolder01
-    #decFile01
     
-    echo -e "\nStep 2: ${cpt^^} Content Decryption (decrypts all ${cpt} file contents)"
+    # First, ensure databases exist
+    if [[ ! -f "$pathToFile" ]] || [[ ! -f "$pathToFolder" ]]; then
+        echo "ERROR: Database files not found in $CONFIG_DIR"
+        echo "Cannot restore original names without database."
+        return 1
+    fi
+    
+    echo "Step 1: Hash-based Filename Restoration"
+    echo "--------------------------------------------------------"
+    decFile01
+    decFolder01
+    remove_empty_folders
+
+       
+    echo -e "\nStep 2: SSL Content Decryption"
     echo "--------------------------------------------------------"
     dec_ssl
     
@@ -508,13 +504,8 @@ decrypt_complete() {
     echo "All files restored to original state"
 }
 
-$*
-<<cases
 # Main script execution
 case "$1" in
-    encOne)
-    isaEncOne 
-    ;;
     encrypt|main)
         encrypt_complete
         ;;
@@ -522,30 +513,39 @@ case "$1" in
         decrypt_complete
         ;;
     encssl)
+        # For SSL only, still need to save database if not exists
+        if [[ ! -f "$pathToFile" ]]; then
+            saveDatabases
+        fi
         enc_ssl
         ;;
     decssl)
         dec_ssl
         ;;
     encmd5)
-        shift
+        if [[ ! -f "$pathToFile" ]]; then
+            echo "WARNING: No database found. Run 'encrypt' first for full encryption."
+            saveDatabases
+        fi
         encFile01
         encFolder01
         ;;
     decmd5)
-        shift
         decFile01
         decFolder01
         ;;
     help|--help|-h)
         echo "Usage: $0 [encrypt|decrypt|encssl|decssl|encmd5|decmd5]"
         echo ""
-        echo "  encrypt  - COMPLETE: SSL encrypt ALL files, THEN rename to MD5 hashes"
-        echo "  decrypt  - COMPLETE: Restore MD5 names FIRST, THEN SSL decrypt ALL files"
+        echo "  encrypt  - COMPLETE: Save database, SSL encrypt, THEN hash rename"
+        echo "  decrypt  - COMPLETE: Hash restore names FIRST, THEN SSL decrypt"
         echo "  encssl   - ONLY encrypt file contents with SSL (creates .ssl files)"
         echo "  decssl   - ONLY decrypt .ssl files back to original"
-        echo "  encmd5   - ONLY rename files to MD5 hashes (assumes already SSL encrypted)"
-        echo "  decmd5   - ONLY restore original filenames from MD5 hashes"
+        echo "  encmd5   - ONLY rename files to $hash hashes"
+        echo "  decmd5   - ONLY restore original filenames from $hash hashes"
+        echo ""
+        echo "Database location: $CONFIG_DIR"
+        echo "Current hash algorithm: $hash"
         ;;
     *)
         if [[ -z $1 ]]; then
@@ -557,5 +557,3 @@ case "$1" in
         exit 1
         ;;
 esac
-
-cases

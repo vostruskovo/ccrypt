@@ -11,9 +11,9 @@ pathToHashMapping="/etc/configHashMapping_ccript.txt"
 
 # Global variables
 pass=""
+ssl_pass=""
 cpt="ssl"
 hash="sha256"
-
 
 <<hashed
 #md5
@@ -27,26 +27,25 @@ hash="sha256"
 hashed
 
 isaEncOne() {
-    local file="$1"
+    local name="$1"
     case ${hash} in
         "md5")
-            [[ ${#file} -eq 32 ]] && echo 1 || echo 0
+            [[ ${#name} -eq 32 ]] && echo 1 || echo 0
             ;;
         "sha1")
-            [[ ${#file} -eq 40 ]] && echo 1 || echo 0
+            [[ ${#name} -eq 40 ]] && echo 1 || echo 0
             ;;
         "sha256")
-            [[ ${#file} -eq 64 ]] && echo 1 || echo 0
+            [[ ${#name} -eq 64 ]] && echo 1 || echo 0
             ;;
         "sha512")
-            [[ ${#file} -eq 128 ]] && echo 1 || echo 0
+            [[ ${#name} -eq 128 ]] && echo 1 || echo 0
             ;;
         *)
             echo 0
             ;;
     esac
 }
-
 
 # Function to set password with hidden input
 setPass() {
@@ -88,32 +87,6 @@ getPath() {
     if [[ $howmanySlashes -eq 0 ]]; then
         echo "."
     else
-        echo "$1" | cut -d "/" -f1-$((howmanySlashes + 1))
-    fi
-}
-
-getPathFromFile() {
-    local howmanySlashes=$(getHowmanySlashes "$1")
-    if [[ -f "$1" ]]; then
-        if [[ $howmanySlashes -eq 0 ]]; then
-            echo "."
-        else
-            echo "$1" | cut -d "/" -f1-$((howmanySlashes))
-        fi
-    else
-        if [[ $howmanySlashes -eq 0 ]]; then
-            echo "."
-        else
-            echo "$1" | cut -d "/" -f1-$((howmanySlashes + 1))
-        fi
-    fi
-}
-
-getROOT() {
-    local howmanySlashes=$(getHowmanySlashes "$1")
-    if [[ $howmanySlashes -eq 0 ]]; then
-        echo "."
-    else
         echo "$1" | cut -d "/" -f1-$((howmanySlashes))
     fi
 }
@@ -123,16 +96,7 @@ getFile() {
     if [[ $howmanySlashes -eq 0 ]]; then
         echo "$1"
     else
-        echo "$1" | cut -d "/" -f$((howmanySlashes + 1))
-    fi
-}
-
-getFolder() {
-    local howmanySlashes=$(getHowmanySlashes "$1")
-    if [[ $howmanySlashes -eq 0 ]]; then
-        echo "$1"
-    else
-        echo "$1" | cut -d "/" -f$((howmanySlashes + 1))
+        echo "$1" | awk -F/ '{print $NF}'
     fi
 }
 
@@ -154,26 +118,10 @@ encrypt() {
     echo -n "$pass$file" | ${hash}sum | cut -d " " -f1
 }
 
-reverse() {
-    local array=($*)
-    local array_copy=()
-    local x=$((${#array[@]} - 1))
-    for i in $(eval echo {$x..0}); do
-        array_copy+=("${array[$i]}")
-    done
-    echo "${array_copy[@]}"
-}
-
 # Database maintenance functions
 toFolder() {
     local path="$pathToFolder"
-    # Skip current directory and parent directory
-    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///') )
-    local existing=()
-    
-    if [[ -f "$path" ]]; then
-        mapfile -t existing < "$path"
-    fi
+    local tree=( $(find . -type d ! -path "." ! -path ".." 2>/dev/null | sed 's/^\.\///' | sort) )
     
     # Clear the file and rewrite all folders
     > "$path"
@@ -186,12 +134,7 @@ toFolder() {
 
 toFile() {
     local path="$pathToFile"
-    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
-    local existing=()
-    
-    if [[ -f "$path" ]]; then
-        mapfile -t existing < "$path"
-    fi
+    local tree=( $(find . -type f ! -name "*.ssl" 2>/dev/null | sed 's/^\.\///' | sort) )
     
     # Clear the file and rewrite all files
     > "$path"
@@ -230,7 +173,7 @@ getAllEncFiles() {
             E_files+=("$item")
         fi
     done
-    echo "${E_files[@]}"
+    printf '%s\n' "${E_files[@]}"
 }
 
 getAllNoEncFiles() {
@@ -243,7 +186,7 @@ getAllNoEncFiles() {
             D_files+=("$item")
         fi
     done
-    echo "${D_files[@]}"
+    printf '%s\n' "${D_files[@]}"
 }
 
 # Folder encryption/decryption (hash rename)
@@ -257,7 +200,7 @@ getAllEncFolders() {
             E_folders+=("$item")
         fi
     done
-    echo "${E_folders[@]}"
+    printf '%s\n' "${E_folders[@]}"
 }
 
 getAllNoEncFolders() {
@@ -270,7 +213,7 @@ getAllNoEncFolders() {
             D_folders+=("$item")
         fi
     done
-    echo "${D_folders[@]}"
+    printf '%s\n' "${D_folders[@]}"
 }
 
 encFile01() {
@@ -287,13 +230,12 @@ encFile01() {
             # Remove leading ./ if present
             target="${target#./}"
             if [[ -f "$target" ]]; then
-                local root=$(getROOT "$target")
+                local path=$(getPath "$target")
                 local file=$(getFile "$target")
                 local C_file=$(encrypt "$file")
                 
                 # Check if this file is already a hash (was encrypted before)
                 if [[ $(isaEncOne "$file") -eq 1 ]]; then
-                    # This is already a hash - try to find original
                     local original=$(getOriginalFromHash "$file" "file")
                     if [[ -n "$original" ]]; then
                         echo "This file appears to be already encrypted (original: $original)"
@@ -307,21 +249,21 @@ encFile01() {
                 
                 # Save mapping before renaming
                 saveHashMapping "$file" "$C_file" "file"
-                echo "Renaming with ${hash}: $target -> $root/$C_file"
-                mv "$target" "$root/$C_file"
+                echo "Renaming with ${hash}: $target -> $path/$C_file"
+                mv "$target" "$path/$C_file"
             fi
         done
     else
         # Encrypt all unencrypted files
         for file in "${files[@]}"; do
-            local root=$(getROOT "$file")
+            local path=$(getPath "$file")
             local filename=$(getFile "$file")
             local C_file=$(encrypt "$filename")
             
             # Save mapping before renaming
             saveHashMapping "$filename" "$C_file" "file"
-            echo "Renaming with ${hash}: $file -> $root/$C_file"
-            mv "$file" "$root/$C_file"
+            echo "Renaming with ${hash}: $file -> $path/$C_file"
+            mv "$file" "$path/$C_file"
         done
     fi
 }
@@ -338,74 +280,67 @@ decFile01() {
         # Decrypt specific files
         for target in "$@"; do
             target="${target#./}"
-            for enc_file in "${E_files[@]}"; do
-                enc_file="${enc_file#./}"
-                local enc_filename=$(getFile "$enc_file")
-                
-                # Try to get original from hash mapping first
-                local orig_filename=$(getOriginalFromHash "$enc_filename" "file")
-                
-                if [[ -n "$orig_filename" ]]; then
-                    local path=$(getPathFromFile "$enc_file")
-                    echo "Restoring from ${hash} (using mapping): $enc_file -> $path/$orig_filename"
-                    mv "$enc_file" "$path/$orig_filename"
-                    break
-                else
-                    # Fall back to database lookup
-                    if [[ -f "$pathToFile" ]]; then
-                        while IFS= read -r db_item; do
-                            local db_file=$(getFile "$db_item")
-                            local C_db=$(encrypt "$db_file")
-                            if [[ "$enc_filename" == "$C_db" ]]; then
-                                local path=$(getPathFromFile "$enc_file")
-                                echo "Restoring from ${hash} (using database): $enc_file -> $path/$db_file"
-                                mv "$enc_file" "$path/$db_file"
-                                break 2
-                            fi
-                        done < "$pathToFile"
-                    fi
+            # Check if the target exists as a file
+            if [[ ! -f "$target" ]]; then
+                echo "File not found: $target"
+                continue
+            fi
+            
+            local enc_filename=$(getFile "$target")
+            local path=$(getPath "$target")
+            
+            # Try to get original from hash mapping first
+            local orig_filename=$(getOriginalFromHash "$enc_filename" "file")
+            
+            if [[ -n "$orig_filename" ]]; then
+                echo "Restoring from ${hash} (using mapping): $target -> $path/$orig_filename"
+                mv "$target" "$path/$orig_filename"
+            else
+                # Fall back to database lookup
+                if [[ -f "$pathToFile" ]]; then
+                    while IFS= read -r db_item; do
+                        local db_file=$(getFile "$db_item")
+                        local C_db=$(encrypt "$db_file")
+                        if [[ "$enc_filename" == "$C_db" ]]; then
+                            echo "Restoring from ${hash} (using database): $target -> $path/$db_file"
+                            mv "$target" "$path/$db_file"
+                            break
+                        fi
+                    done < "$pathToFile"
                 fi
-            done
+            fi
         done
     else
-        # Decrypt all encrypted files - use mapping file for reverse order
+        # Decrypt all encrypted files
         if [[ -f "$pathToHashMapping" ]]; then
             # Get all file mappings in reverse order (last encrypted first)
             mapfile -t mappings < <(grep "^file|" "$pathToHashMapping" | tac)
             
-            for mapping in "${mappings[@]}"; do
-                IFS='|' read -r type original hash_val <<< "$mapping"
+            for enc_file in "${E_files[@]}"; do
+                enc_file="${enc_file#./}"
+                local enc_filename=$(getFile "$enc_file")
+                local path=$(getPath "$enc_file")
+                local found=0
                 
-                # Find file with this hash
-                for enc_file in "${E_files[@]}"; do
-                    enc_file="${enc_file#./}"
-                    local enc_filename=$(getFile "$enc_file")
+                for mapping in "${mappings[@]}"; do
+                    IFS='|' read -r type original hash_val <<< "$mapping"
                     
                     if [[ "$enc_filename" == "$hash_val" ]]; then
-                        local path=$(getPathFromFile "$enc_file")
                         echo "Restoring from ${hash}: $enc_file -> $path/$original"
-                        mv "$enc_file" "$path/$original"
-                        break
+                        if [[ -f "$enc_file" ]]; then
+                            mv "$enc_file" "$path/$original"
+                            found=1
+                            break
+                        fi
                     fi
                 done
+                
+                if [[ $found -eq 0 ]]; then
+                    echo "Warning: Could not find original name for: $enc_file"
+                fi
             done
         else
-            # Fall back to old method
-            local allfiles=($(cat "$pathToFile"))
-            for ((i=${#E_files[@]}-1; i>=0; i--)); do
-                for ((j=${#allfiles[@]}-1; j>=0; j--)); do
-                    local enc_filename=$(getFile "${E_files[$i]}")
-                    local orig_filename=$(getFile "${allfiles[$j]}")
-                    local C_orig=$(encrypt "$orig_filename")
-                    
-                    if [[ "$enc_filename" == "$C_orig" ]]; then
-                        local path=$(getPathFromFile "${E_files[$i]}")
-                        echo "Restoring from ${hash}: ${E_files[$i]} -> $path/$orig_filename"
-                        mv "${E_files[$i]}" "$path/$orig_filename"
-                        break
-                    fi
-                done
-            done
+            echo "No hash mapping file found. Cannot decrypt files."
         fi
     fi
 }
@@ -416,7 +351,7 @@ encFolder01() {
         setPass || return 1
     fi
 
-    local D_folders=($(getAllNoEncFolders))
+    local D_folders=($(getAllNoEncFolders | sort -r))
     
     if [[ $# -gt 0 ]]; then
         # Encrypt specific folders
@@ -425,8 +360,7 @@ encFolder01() {
             # Remove trailing slash if present
             target="${target%/}"
             if [[ -d "$target" && "$target" != "." && "$target" != ".." ]]; then
-                local howmanySlashes=$(getHowmanySlashes "$target")
-                local path=$(echo "$target" | cut -d "/" -f1-$((howmanySlashes)))
+                local path=$(getPath "$target")
                 local folder=$(getFile "$target")
                 local C_folder=$(encrypt "${folder}/")
                 
@@ -451,8 +385,7 @@ encFolder01() {
         done
     else
         # Encrypt all unencrypted folders (in reverse order for nested folders)
-        for ((i=${#D_folders[@]}-1; i>=0; i--)); do
-            local folder_item="${D_folders[$i]}"
+        for folder_item in "${D_folders[@]}"; do
             folder_item="${folder_item#./}"
             
             # Skip current directory
@@ -460,23 +393,14 @@ encFolder01() {
                 continue
             fi
             
-            local root=$(getROOT "$folder_item")
+            local path=$(getPath "$folder_item")
             local folder=$(getFile "$folder_item")
-            local answer=$(validatin "$folder_item")
+            local C_folder=$(encrypt "${folder}/")
             
-            if [[ $answer == "false" ]]; then
-                local C_folder=$(encrypt "${root}/")
-                # Save mapping
-                saveHashMapping "$folder" "$C_folder" "folder"
-                echo "Renaming folder with ${hash}: $folder_item -> $C_folder"
-                mv "$folder_item" "$C_folder" 2>/dev/null
-            else
-                local C_folder=$(encrypt "${folder}/")
-                # Save mapping
-                saveHashMapping "$folder" "$C_folder" "folder"
-                echo "Renaming folder with ${hash}: $folder_item -> $root/$C_folder"
-                mv "$folder_item" "$root/$C_folder" 2>/dev/null
-            fi
+            # Save mapping
+            saveHashMapping "$folder" "$C_folder" "folder"
+            echo "Renaming folder with ${hash}: $folder_item -> $path/$C_folder"
+            mv "$folder_item" "$path/$C_folder" 2>/dev/null
         done
     fi
 }
@@ -487,7 +411,7 @@ decFolder01() {
         setPass || return 1
     fi
 
-    local E_folders=($(getAllEncFolders | tr ' ' '\n' | sort -r | tr '\n' ' '))
+    local E_folders=($(getAllEncFolders | sort -r))
     
     echo "Found ${#E_folders[@]} encrypted folders (${hash} hashes) to decrypt"
     
@@ -497,78 +421,49 @@ decFolder01() {
             target="${target#./}"
             target="${target%/}"
             
-            for enc_folder in "${E_folders[@]}"; do
-                enc_folder="${enc_folder#./}"
-                local enc_name=$(getFile "$enc_folder")
-                
-                # Try to get original from hash mapping
-                local orig_name=$(getOriginalFromHash "$enc_name" "folder")
-                
-                if [[ -n "$orig_name" ]]; then
-                    local path=$(getPathFromFile "$enc_folder")
-                    echo "Restoring folder from ${hash} (using mapping): $enc_folder -> $path/$orig_name"
-                    if mv "$enc_folder" "$path/$orig_name" 2>/dev/null; then
-                        echo "  Successfully restored: $orig_name"
-                    fi
-                    break
-                else
-                    # Fall back to database
-                    if [[ -f "$pathToFolder" ]]; then
-                        while IFS= read -r db_item; do
-                            local db_folder=$(getFile "$db_item")
-                            local C_db=$(encrypt "${db_folder}/")
-                            if [[ "$enc_name" == "$C_db" ]]; then
-                                local path=$(getPathFromFile "$enc_folder")
-                                echo "Restoring folder from ${hash}: $enc_folder -> $path/$db_folder"
-                                mv "$enc_folder" "$path/$db_folder" 2>/dev/null
-                                break 2
-                            fi
-                        done < "$pathToFolder"
-                    fi
+            if [[ ! -d "$target" ]]; then
+                echo "Folder not found: $target"
+                continue
+            fi
+            
+            local enc_name=$(getFile "$target")
+            local path=$(getPath "$target")
+            
+            # Try to get original from hash mapping
+            local orig_name=$(getOriginalFromHash "$enc_name" "folder")
+            
+            if [[ -n "$orig_name" ]]; then
+                echo "Restoring folder from ${hash} (using mapping): $target -> $path/$orig_name"
+                if [[ -d "$target" ]]; then
+                    mv "$target" "$path/$orig_name" 2>/dev/null
+                    echo "  Successfully restored: $orig_name"
                 fi
-            done
+            else
+                echo "Warning: Could not find original name for encrypted folder: $target"
+            fi
         done
     else
-        # Decrypt all encrypted folders - use mapping file
+        # Decrypt all encrypted folders
         if [[ -f "$pathToHashMapping" ]]; then
             # Get all folder mappings in reverse order
             mapfile -t mappings < <(grep "^folder|" "$pathToHashMapping" | tac)
             
-            for mapping in "${mappings[@]}"; do
-                IFS='|' read -r type original hash_val <<< "$mapping"
-                
-                # Find folder with this hash
-                for enc_folder in "${E_folders[@]}"; do
-                    enc_folder="${enc_folder#./}"
-                    local enc_name=$(getFile "$enc_folder")
-                    
-                    if [[ "$enc_name" == "$hash_val" ]]; then
-                        local path=$(getPathFromFile "$enc_folder")
-                        echo "Restoring folder from ${hash}: $enc_folder -> $path/$original"
-                        mv "$enc_folder" "$path/$original" 2>/dev/null
-                        break
-                    fi
-                done
-            done
-        else
-            # Fall back to old method
-            local allfolders=($(tac "$pathToFolder" 2>/dev/null || cat "$pathToFolder" | tail -r))
             for enc_folder in "${E_folders[@]}"; do
                 enc_folder="${enc_folder#./}"
                 local enc_name=$(getFile "$enc_folder")
+                local path=$(getPath "$enc_folder")
                 local found=0
                 
-                for orig_folder in "${allfolders[@]}"; do
-                    orig_folder="${orig_folder#./}"
-                    local orig_name=$(getFile "$orig_folder")
-                    local C_orig=$(encrypt "${orig_name}/")
+                for mapping in "${mappings[@]}"; do
+                    IFS='|' read -r type original hash_val <<< "$mapping"
                     
-                    if [[ "$enc_name" == "$C_orig" ]]; then
-                        local path=$(getPathFromFile "$enc_folder")
-                        echo "Restoring folder from ${hash}: $enc_folder -> $path/$orig_name"
-                        mv "$enc_folder" "$path/$orig_name" 2>/dev/null
-                        found=1
-                        break
+                    if [[ "$enc_name" == "$hash_val" ]]; then
+                        echo "Restoring folder from ${hash}: $enc_folder -> $path/$original"
+                        if [[ -d "$enc_folder" ]]; then
+                            mv "$enc_folder" "$path/$original" 2>/dev/null
+                            found=1
+                            break
+                        fi
                     fi
                 done
                 
@@ -576,6 +471,8 @@ decFolder01() {
                     echo "Warning: Could not find original name for encrypted folder: $enc_folder"
                 fi
             done
+        else
+            echo "No hash mapping file found. Cannot decrypt folders."
         fi
     fi
 }
@@ -608,22 +505,14 @@ enc_ssl() {
     fi
     
     local bits=256
-    # Find ALL files (including those in subdirectories)
-    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
-    local files=()
+    # Find ALL files (excluding .ssl files)
+    local tree=( $(find . -type f ! -name "*.ssl" 2>/dev/null | sed 's/^\.\///') )
     local encrypted_count=0
     
-    for item in "${tree[@]}"; do
-        # Skip .ssl files (already encrypted)
-        if [[ "$item" != *.ssl ]]; then
-            files+=("$item")
-        fi
-    done
+    echo "Found ${#tree[@]} files to encrypt with SSL"
     
-    echo "Found ${#files[@]} files to encrypt with SSL"
-    
-    if [[ ${#files[@]} -gt 0 ]]; then
-        for file in "${files[@]}"; do
+    if [[ ${#tree[@]} -gt 0 ]]; then
+        for file in "${tree[@]}"; do
             if [[ -f "$file" ]]; then
                 echo "SSL Encrypting: $file"
                 # Create encrypted file with .ssl extension

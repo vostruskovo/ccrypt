@@ -1,0 +1,1079 @@
+#!/bin/bash
+
+# Configuration paths - stores database files for folder/file listings
+# Use absolute paths that won't be affected by encryption
+CONFIG_DIR="/etc/cryptoconfig"
+pathToFolder="$CONFIG_DIR/folders.txt"
+pathToFile="$CONFIG_DIR/files.txt"
+pathToSsl="$CONFIG_DIR/ssl_pass.txt"  # Store SSL password hash
+pathToGpg="$CONFIG_DIR/gpg_pass.txt"  # Store GPG password hash
+pathToAes="$CONFIG_DIR/aes_pass.txt"  # Store AES password hash
+pathToRsa="$CONFIG_DIR/rsa_pass.txt"  # Store RSA password hash
+pathToRsaKey="$CONFIG_DIR/rsa_key.pem" # RSA private key
+pathToRsaPub="$CONFIG_DIR/rsa_pub.pem" # RSA public key
+pathToGen="$CONFIG_DIR/gen.txt"
+pathToEnc="$CONFIG_DIR/enc.txt"
+
+# Create config directory if it doesn't exist
+mkdir -p "$CONFIG_DIR"
+
+# Global variables
+pass=""        # Stores hashed password for hash-based renaming operations
+ssl_pass_hash="" # Stores hashed SSL password for verification
+gpg_pass_hash="" # Stores hashed GPG password for verification
+aes_pass_hash="" # Stores hashed AES password for verification
+rsa_pass_hash="" # Stores hashed RSA password for verification
+hash="sha512"     # Current hash algorithm being used (md5, sha1, sha256, sha512)
+operation_mode="" # Track current operation mode
+cpt="rsa"        # Encryption method: "ssl", "gpg", "aes", or "rsa" (default: rsa)
+aes_bits=256     # AES key size: 128, 192, or 256
+aes_mode="cbc"    # AES mode: cbc, cfb, ofb, ecb
+rsa_bits=2048    # RSA key size: 1024, 2048, 4096
+
+# Function to check if a string matches the current hash algorithm's length
+isaEncOne() {
+    local name="$1"
+    case ${hash} in
+        "md5")
+            [[ ${#name} -eq 32 ]] && echo 1 || echo 0
+            ;;
+        "sha1")
+            [[ ${#name} -eq 40 ]] && echo 1 || echo 0
+            ;;
+        "sha256")
+            [[ ${#name} -eq 64 ]] && echo 1 || echo 0
+            ;;
+        "sha512")
+            [[ ${#name} -eq 128 ]] && echo 1 || echo 0
+            ;;
+        *)
+            echo 0
+            ;;
+    esac
+}
+
+# Function to set password with hidden input
+setPass() {
+    local char
+    local input_pass=""
+    local purpose="$1"  # "hash", "ssl", "gpg", "aes", or "rsa"
+    
+    printf "Enter ${purpose} password: "
+    while IFS= read -r -s -n1 char; do
+        if [[ $char = "" ]]; then
+            printf "\n"
+            break
+        elif [[ $char = $'\177' ]]; then
+            if [[ -n $input_pass ]]; then
+                input_pass=${input_pass%?}
+                printf '\b \b'
+            fi
+        else
+            input_pass+=$char
+            printf "*"
+        fi
+    done
+    echo
+    
+    if [[ -z $input_pass ]]; then
+        echo "Password cannot be empty"
+        return 1
+    fi
+    
+    # Store based on purpose
+    if [[ "$purpose" == "ssl" ]]; then
+        # For SSL, store both plain for immediate use and hash for verification
+        ssl_pass_plain="$input_pass"
+        ssl_pass_hash=$(echo -n "$input_pass" | sha256sum | cut -d " " -f1)
+        # Save SSL password hash for verification during decryption
+        echo "$ssl_pass_hash" > "$pathToSsl"
+    elif [[ "$purpose" == "gpg" ]]; then
+        # For GPG, store both plain for immediate use and hash for verification
+        gpg_pass_plain="$input_pass"
+        gpg_pass_hash=$(echo -n "$input_pass" | sha256sum | cut -d " " -f1)
+        # Save GPG password hash for verification during decryption
+        echo "$gpg_pass_hash" > "$pathToGpg"
+    elif [[ "$purpose" == "aes" ]]; then
+        # For AES, store both plain for immediate use and hash for verification
+        aes_pass_plain="$input_pass"
+        aes_pass_hash=$(echo -n "$input_pass" | sha256sum | cut -d " " -f1)
+        # Save AES password hash for verification during decryption
+        echo "$aes_pass_hash" > "$pathToAes"
+    elif [[ "$purpose" == "rsa" ]]; then
+        # For RSA, store both plain for immediate use and hash for verification
+        rsa_pass_plain="$input_pass"
+        rsa_pass_hash=$(echo -n "$input_pass" | sha256sum | cut -d " " -f1)
+        # Save RSA password hash for verification during decryption
+        echo "$rsa_pass_hash" > "$pathToRsa"
+    else
+        # For hash-based renaming
+        ssl_pass_plain=""  # Clear SSL password when setting hash password
+        gpg_pass_plain=""  # Clear GPG password when setting hash password
+        aes_pass_plain=""  # Clear AES password when setting hash password
+        rsa_pass_plain=""  # Clear RSA password when setting hash password
+        pass=$(echo -n "$input_pass" | ${hash}sum | cut -d " " -f1)
+    fi
+}
+
+# Verify SSL password against stored hash
+verify_ssl_pass() {
+    if [[ ! -f "$pathToSsl" ]]; then
+        echo "No SSL password record found. Did you encrypt with this tool?"
+        return 1
+    fi
+    
+    local stored_hash=$(cat "$pathToSsl")
+    local input_hash=$(echo -n "$ssl_pass_plain" | sha256sum | cut -d " " -f1)
+    
+    if [[ "$input_hash" != "$stored_hash" ]]; then
+        echo "Incorrect SSL password!"
+        return 1
+    fi
+    return 0
+}
+
+# Verify GPG password against stored hash
+verify_gpg_pass() {
+    if [[ ! -f "$pathToGpg" ]]; then
+        echo "No GPG password record found. Did you encrypt with this tool?"
+        return 1
+    fi
+    
+    local stored_hash=$(cat "$pathToGpg")
+    local input_hash=$(echo -n "$gpg_pass_plain" | sha256sum | cut -d " " -f1)
+    
+    if [[ "$input_hash" != "$stored_hash" ]]; then
+        echo "Incorrect GPG password!"
+        return 1
+    fi
+    return 0
+}
+
+# Verify AES password against stored hash
+verify_aes_pass() {
+    if [[ ! -f "$pathToAes" ]]; then
+        echo "No AES password record found. Did you encrypt with this tool?"
+        return 1
+    fi
+    
+    local stored_hash=$(cat "$pathToAes")
+    local input_hash=$(echo -n "$aes_pass_plain" | sha256sum | cut -d " " -f1)
+    
+    if [[ "$input_hash" != "$stored_hash" ]]; then
+        echo "Incorrect AES password!"
+        return 1
+    fi
+    return 0
+}
+
+# Verify RSA password against stored hash
+verify_rsa_pass() {
+    if [[ ! -f "$pathToRsa" ]]; then
+        echo "No RSA password record found. Did you encrypt with this tool?"
+        return 1
+    fi
+    
+    local stored_hash=$(cat "$pathToRsa")
+    local input_hash=$(echo -n "$rsa_pass_plain" | sha256sum | cut -d " " -f1)
+    
+    if [[ "$input_hash" != "$stored_hash" ]]; then
+        echo "Incorrect RSA password!"
+        return 1
+    fi
+    return 0
+}
+
+# Helper functions for path manipulation
+getHowmanySlashes() {
+    echo "$1" | grep -o "/" | wc -l
+}
+
+getROOT() {
+    local howmanySlashes=$(getHowmanySlashes "$1")
+    if [[ $howmanySlashes -eq 0 ]]; then
+        echo "."
+    else
+        echo "$1" | cut -d "/" -f1-$((howmanySlashes))
+    fi
+}
+
+getFile() {
+    local howmanySlashes=$(getHowmanySlashes "$1")
+    if [[ $howmanySlashes -eq 0 ]]; then
+        echo "$1"
+    else
+        echo "$1" | cut -d "/" -f$((howmanySlashes + 1))
+    fi
+}
+
+# Core hash function for renaming
+encrypt() {
+    local file="$1"
+    if [[ -z $pass ]]; then
+        echo "Hash password not set" >&2
+        return 1
+    fi
+    echo -n "$pass$file" | ${hash}sum | cut -d " " -f1
+}
+
+# Database maintenance functions - using absolute paths that won't be affected
+saveDatabases() {
+    # Save current file structure BEFORE any encryption
+    echo "Saving directory structure to database..."
+    > "$pathToFolder"
+    > "$pathToFile"
+    
+    # Save all directories
+    find . -type d ! -path "." 2>/dev/null | sed 's/^\.\///' | while read -r item; do
+        if [[ -n "$item" && "$item" != "." && "$item" != ".." ]]; then
+            echo "$item" >> "$pathToFolder"
+        fi
+    done
+    
+    # Save all files
+    find . -type f 2>/dev/null | sed 's/^\.\///' | while read -r item; do
+        if [[ -n "$item" ]]; then
+            echo "$item" >> "$pathToFile"
+        fi
+    done
+    
+    echo "Database saved: $(wc -l < "$pathToFile") files, $(wc -l < "$pathToFolder") folders"
+}
+
+# SSL Encryption
+enc_ssl() {
+    if [[ -z $ssl_pass_plain ]]; then
+        setPass "ssl" || return 1
+    fi
+    
+    local bits=256
+    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
+    local files=()
+    local encrypted_count=0
+    
+    # Filter out .ssl files and config files
+    for item in "${tree[@]}"; do
+        if [[ "$item" != *.ssl && "$item" != "$CONFIG_DIR"* ]]; then
+            files+=("$item")
+        fi
+    done
+    
+    echo "Found ${#files[@]} files to encrypt with SSL"
+    
+    if [[ ${#files[@]} -gt 0 ]]; then
+        for file in "${files[@]}"; do
+            if [[ -f "$file" ]]; then
+                echo "SSL Encrypting: $file"
+                if openssl enc -aes-${bits}-cbc -salt -in "$file" -out "${file}.ssl" -k "$ssl_pass_plain" 2>/dev/null; then
+                    rm "$file"
+                    echo "  -> ${file}.ssl"
+                    ((encrypted_count++))
+                else
+                    echo "  Failed to encrypt: $file"
+                fi
+            fi
+        done
+        echo "SSL Encryption complete: $encrypted_count files encrypted"
+    else
+        echo "No files to encrypt with SSL"
+    fi
+}
+
+# SSL Decryption
+dec_ssl() {
+    if [[ -z $ssl_pass_plain ]]; then
+        setPass "ssl" || return 1
+    fi
+    
+    # Verify password against stored hash
+    verify_ssl_pass || return 1
+    
+    local bits=256
+    local tree=( $(find . -name "*.ssl" -type f 2>/dev/null | sed 's/^\.\///') )
+    local decrypted_count=0
+    
+    echo "Found ${#tree[@]} SSL files to decrypt"
+    
+    for file in "${tree[@]}"; do
+        local output="${file%.ssl}"
+        echo "Decrypting: $file -> $output"
+        if openssl enc -d -aes-256-cbc -in "$file" -out "$output" -k "$ssl_pass_plain" 2>/dev/null; then
+            rm "$file"
+            echo "  Decrypted: $file"
+            ((decrypted_count++))
+        else
+            echo "  Failed to decrypt: $file (wrong password?)"
+        fi
+    done
+    echo "SSL Decryption complete: $decrypted_count files decrypted"
+}
+
+# GPG Encryption
+enc_gpg() {
+    if [[ -z $gpg_pass_plain ]]; then
+        setPass "gpg" || return 1
+    fi
+    
+    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
+    local files=()
+    local encrypted_count=0
+    
+    # Filter out .gpg files and config files
+    for item in "${tree[@]}"; do
+        if [[ "$item" != *.gpg && "$item" != "$CONFIG_DIR"* ]]; then
+            files+=("$item")
+        fi
+    done
+    
+    echo "Found ${#files[@]} files to encrypt with GPG"
+    
+    if [[ ${#files[@]} -gt 0 ]]; then
+        for file in "${files[@]}"; do
+            if [[ -f "$file" ]]; then
+                echo "GPG Encrypting: $file"
+                # Use gpg symmetric encryption with password
+                if gpg --batch --yes --passphrase "$gpg_pass_plain" -c --output "${file}.gpg" "$file" 2>/dev/null; then
+                    rm "$file"
+                    echo "  -> ${file}.gpg"
+                    ((encrypted_count++))
+                else
+                    echo "  Failed to encrypt: $file"
+                fi
+            fi
+        done
+        echo "GPG Encryption complete: $encrypted_count files encrypted"
+    else
+        echo "No files to encrypt with GPG"
+    fi
+}
+
+# GPG Decryption
+dec_gpg() {
+    if [[ -z $gpg_pass_plain ]]; then
+        setPass "gpg" || return 1
+    fi
+    
+    # Verify password against stored hash
+    verify_gpg_pass || return 1
+    
+    local tree=( $(find . -name "*.gpg" -type f 2>/dev/null | sed 's/^\.\///') )
+    local decrypted_count=0
+    
+    echo "Found ${#tree[@]} GPG files to decrypt"
+    
+    for file in "${tree[@]}"; do
+        local output="${file%.gpg}"
+        echo "Decrypting: $file -> $output"
+        if gpg --batch --yes --passphrase "$gpg_pass_plain" -d --output "$output" "$file" 2>/dev/null; then
+            rm "$file"
+            echo "  Decrypted: $file"
+            ((decrypted_count++))
+        else
+            echo "  Failed to decrypt: $file (wrong password?)"
+        fi
+    done
+    echo "GPG Decryption complete: $decrypted_count files decrypted"
+}
+
+# AES Encryption (using OpenSSL)
+enc_aes() {
+    if [[ -z $aes_pass_plain ]]; then
+        setPass "aes" || return 1
+    fi
+    
+    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
+    local files=()
+    local encrypted_count=0
+    
+    # Filter out .aes files and config files
+    for item in "${tree[@]}"; do
+        if [[ "$item" != *.aes && "$item" != "$CONFIG_DIR"* ]]; then
+            files+=("$item")
+        fi
+    done
+    
+    echo "Found ${#files[@]} files to encrypt with AES-${aes_bits}-${aes_mode}"
+    
+    if [[ ${#files[@]} -gt 0 ]]; then
+        for file in "${files[@]}"; do
+            if [[ -f "$file" ]]; then
+                echo "AES Encrypting: $file"
+                # Use openssl enc with AES
+                if openssl enc -aes-${aes_bits}-${aes_mode} -salt -in "$file" -out "${file}.aes" -k "$aes_pass_plain" 2>/dev/null; then
+                    rm "$file"
+                    echo "  -> ${file}.aes"
+                    ((encrypted_count++))
+                else
+                    echo "  Failed to encrypt: $file"
+                fi
+            fi
+        done
+        echo "AES Encryption complete: $encrypted_count files encrypted"
+    else
+        echo "No files to encrypt with AES"
+    fi
+}
+
+# AES Decryption (using OpenSSL)
+dec_aes() {
+    if [[ -z $aes_pass_plain ]]; then
+        setPass "aes" || return 1
+    fi
+    
+    # Verify password against stored hash
+    verify_aes_pass || return 1
+    
+    local tree=( $(find . -name "*.aes" -type f 2>/dev/null | sed 's/^\.\///') )
+    local decrypted_count=0
+    
+    echo "Found ${#tree[@]} AES files to decrypt"
+    
+    for file in "${tree[@]}"; do
+        local output="${file%.aes}"
+        echo "Decrypting: $file -> $output"
+        if openssl enc -d -aes-${aes_bits}-${aes_mode} -in "$file" -out "$output" -k "$aes_pass_plain" 2>/dev/null; then
+            rm "$file"
+            echo "  Decrypted: $file"
+            ((decrypted_count++))
+        else
+            echo "  Failed to decrypt: $file (wrong password?)"
+        fi
+    done
+    echo "AES Decryption complete: $decrypted_count files decrypted"
+}
+
+# Generate RSA key pair
+generate_rsa_keys() {
+    if [[ -f "$pathToRsaKey" ]] && [[ -f "$pathToRsaPub" ]]; then
+        read -p "RSA keys already exist. Overwrite? (y/n): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo "Keeping existing RSA keys"
+            return 0
+        fi
+    fi
+    
+    echo "Generating RSA key pair (${rsa_bits} bits)..."
+    
+    # Generate private key
+    if openssl genrsa -out "$pathToRsaKey" ${rsa_bits} 2>/dev/null; then
+        # Extract public key
+        openssl rsa -in "$pathToRsaKey" -pubout -out "$pathToRsaPub" 2>/dev/null
+        echo "RSA key pair generated successfully:"
+        echo "  Private key: $pathToRsaKey"
+        echo "  Public key: $pathToRsaPub"
+        
+        # Set password for RSA operations
+        if [[ -z $rsa_pass_plain ]]; then
+            setPass "rsa" || return 1
+        fi
+        
+        # Encrypt private key with password
+        openssl rsa -in "$pathToRsaKey" -aes256 -passout pass:"$rsa_pass_plain" -out "$pathToRsaKey.enc" 2>/dev/null
+        mv "$pathToRsaKey.enc" "$pathToRsaKey"
+        
+        return 0
+    else
+        echo "Failed to generate RSA key pair"
+        return 1
+    fi
+}
+
+# RSA Encryption
+enc_rsa() {
+    # Check if RSA keys exist
+    if [[ ! -f "$pathToRsaPub" ]]; then
+        echo "RSA public key not found. Generating new key pair..."
+        generate_rsa_keys || return 1
+    fi
+    
+    if [[ -z $rsa_pass_plain ]]; then
+        setPass "rsa" || return 1
+    fi
+    
+    local tree=( $(find . -type f 2>/dev/null | sed 's/^\.\///') )
+    local files=()
+    local encrypted_count=0
+    
+    # Filter out .rsa files and config files
+    for item in "${tree[@]}"; do
+        if [[ "$item" != *.rsa && "$item" != "$CONFIG_DIR"* ]]; then
+            files+=("$item")
+        fi
+    done
+    
+    echo "Found ${#files[@]} files to encrypt with RSA-${rsa_bits}"
+    echo "Note: RSA is slow for large files. Each file will be encrypted with a random symmetric key,"
+    echo "      which is then encrypted with RSA (hybrid encryption)."
+    
+    if [[ ${#files[@]} -gt 0 ]]; then
+        for file in "${files[@]}"; do
+            if [[ -f "$file" ]]; then
+                echo "RSA Encrypting: $file"
+                
+                # Generate random symmetric key
+                local sym_key=$(openssl rand -hex 32)
+                local sym_key_file=$(mktemp)
+                echo "$sym_key" > "$sym_key_file"
+                
+                # Create temporary files
+                local encrypted_sym_key=$(mktemp)
+                local encrypted_data=$(mktemp)
+                
+                # Encrypt symmetric key with RSA public key
+                if openssl rsautl -encrypt -pubin -inkey "$pathToRsaPub" -in "$sym_key_file" -out "$encrypted_sym_key" 2>/dev/null; then
+                    # Encrypt file with symmetric key (AES-256)
+                    if openssl enc -aes-256-cbc -salt -in "$file" -out "$encrypted_data" -k "$sym_key" 2>/dev/null; then
+                        # Combine encrypted key and encrypted data
+                        cat "$encrypted_sym_key" "$encrypted_data" > "${file}.rsa"
+                        rm "$file"
+                        echo "  -> ${file}.rsa"
+                        ((encrypted_count++))
+                    else
+                        echo "  Failed to encrypt data: $file"
+                    fi
+                else
+                    echo "  Failed to encrypt key: $file"
+                fi
+                
+                # Cleanup
+                rm -f "$sym_key_file" "$encrypted_sym_key" "$encrypted_data" 2>/dev/null
+            fi
+        done
+        echo "RSA Encryption complete: $encrypted_count files encrypted"
+    else
+        echo "No files to encrypt with RSA"
+    fi
+}
+
+# RSA Decryption
+dec_rsa() {
+    # Check if RSA private key exists
+    if [[ ! -f "$pathToRsaKey" ]]; then
+        echo "RSA private key not found at $pathToRsaKey"
+        return 1
+    fi
+    
+    if [[ -z $rsa_pass_plain ]]; then
+        setPass "rsa" || return 1
+    fi
+    
+    # Verify password against stored hash
+    verify_rsa_pass || return 1
+    
+    local tree=( $(find . -name "*.rsa" -type f 2>/dev/null | sed 's/^\.\///') )
+    local decrypted_count=0
+    
+    echo "Found ${#tree[@]} RSA files to decrypt"
+    
+    for file in "${tree[@]}"; do
+        local output="${file%.rsa}"
+        echo "Decrypting: $file -> $output"
+        
+        # Get RSA key size in bytes
+        local key_size=$((rsa_bits / 8))
+        
+        # Extract encrypted symmetric key (first key_size bytes)
+        local encrypted_sym_key=$(mktemp)
+        local encrypted_data=$(mktemp)
+        
+        dd if="$file" of="$encrypted_sym_key" bs=1 count=$key_size 2>/dev/null
+        dd if="$file" of="$encrypted_data" bs=1 skip=$key_size 2>/dev/null
+        
+        # Decrypt symmetric key with RSA private key
+        local sym_key_file=$(mktemp)
+        if openssl rsautl -decrypt -inkey "$pathToRsaKey" -passin pass:"$rsa_pass_plain" -in "$encrypted_sym_key" -out "$sym_key_file" 2>/dev/null; then
+            local sym_key=$(cat "$sym_key_file")
+            
+            # Decrypt data with symmetric key
+            if openssl enc -d -aes-256-cbc -in "$encrypted_data" -out "$output" -k "$sym_key" 2>/dev/null; then
+                rm "$file"
+                echo "  Decrypted: $file"
+                ((decrypted_count++))
+            else
+                echo "  Failed to decrypt data: $file (wrong password?)"
+            fi
+        else
+            echo "  Failed to decrypt key: $file (wrong password?)"
+        fi
+        
+        # Cleanup
+        rm -f "$encrypted_sym_key" "$encrypted_data" "$sym_key_file" 2>/dev/null
+    done
+    echo "RSA Decryption complete: $decrypted_count files decrypted"
+}
+
+# Hash-based Filename Encryption
+encFile01() {
+    if [[ -z $pass ]]; then
+        setPass "hash" || return 1
+    fi
+
+    local tree=( $(find . -type f 2>/dev/null | grep -v "^\./$(basename "$CONFIG_DIR")" | sed 's/^\.\///') )
+    local renamed_count=0
+    
+    # Determine extension based on encryption method
+    local ext=""
+    if [[ "$cpt" == "ssl" ]]; then
+        ext=".ssl"
+    elif [[ "$cpt" == "gpg" ]]; then
+        ext=".gpg"
+    elif [[ "$cpt" == "aes" ]]; then
+        ext=".aes"
+    elif [[ "$cpt" == "rsa" ]]; then
+        ext=".rsa"
+    fi
+    
+    for file in "${tree[@]}"; do
+        local filename=$(getFile "$file")
+        
+        # Check if it's an encrypted file with the current method's extension
+        if [[ "$file" == *"$ext" ]]; then
+            local base="${filename%$ext}"
+            # Skip if already hashed
+            if [[ $(isaEncOne ${base}) == 1 ]]; then
+                continue
+            fi
+            local root=$(getROOT "$file")
+            local C_base=$(encrypt "$base")
+            echo "Renaming: $file -> $root/${C_base}${ext}"
+            mv "$file" "$root/${C_base}${ext}" 2>/dev/null
+            ((renamed_count++))
+        else
+            # Regular file
+            if [[ $(isaEncOne ${filename}) == 1 ]]; then
+                continue
+            fi
+            local root=$(getROOT "$file")
+            local C_name=$(encrypt "$filename")
+            echo "Renaming: $file -> $root/$C_name"
+            mv "$file" "$root/$C_name" 2>/dev/null
+            ((renamed_count++))
+        fi
+    done
+    echo "Hash-based Rename complete: $renamed_count files renamed"
+}
+
+# Hash-based Filename Decryption
+decFile01() {
+    if [[ -z $pass ]]; then
+        setPass "hash" || return 1
+    fi
+
+    if [[ ! -f "$pathToFile" ]]; then
+        echo "Database file not found: $pathToFile"
+        return 1
+    fi
+    
+    # Read original names from database
+    local allfiles=()
+    while IFS= read -r line; do
+        allfiles+=("$line")
+    done < "$pathToFile"
+    
+    local tree=( $(find . -type f 2>/dev/null | grep -v "^\./$(basename "$CONFIG_DIR")" | sed 's/^\.\///') )
+    local restored_count=0
+    
+    # Determine extension based on encryption method
+    local ext=""
+    if [[ "$cpt" == "ssl" ]]; then
+        ext=".ssl"
+    elif [[ "$cpt" == "gpg" ]]; then
+        ext=".gpg"
+    elif [[ "$cpt" == "aes" ]]; then
+        ext=".aes"
+    elif [[ "$cpt" == "rsa" ]]; then
+        ext=".rsa"
+    fi
+    
+    for current_file in "${tree[@]}"; do
+        local current_name=$(getFile "$current_file")
+        local current_path=$(getROOT "$current_file")
+        
+        # Handle encrypted files
+        local is_encrypted=false
+        local base_name="$current_name"
+        if [[ "$current_name" == *"$ext" ]]; then
+            is_encrypted=true
+            base_name="${current_name%$ext}"
+        fi
+        
+        # Check if current name looks like a hash
+        if [[ $(isaEncOne ${base_name}) == 1 ]]; then
+            # Try to find matching original
+            for original in "${allfiles[@]}"; do
+                local orig_name=$(getFile "$original")
+                local orig_path=$(getROOT "$original")
+                local C_orig=$(encrypt "$orig_name")
+                
+                if [[ "$base_name" == "$C_orig" ]]; then
+                    if [[ "$is_encrypted" == true ]]; then
+                        # For encrypted files, keep the extension
+                        local target_name="${orig_name}${ext}"
+                        local target_path="$orig_path"
+                        
+                        # Create directory if needed
+                        if [[ "$current_path" != "$target_path" ]]; then
+                            mkdir -p "$target_path"
+                        fi
+                        
+                        echo "Restoring: $current_file -> $target_path/$target_name"
+                        mv "$current_file" "$target_path/$target_name" 2>/dev/null
+                    else
+                        # Regular file
+                        local target_path="$orig_path"
+                        
+                        # Create directory if needed
+                        if [[ "$current_path" != "$target_path" ]]; then
+                            mkdir -p "$target_path"
+                        fi
+                        
+                        echo "Restoring: $current_file -> $target_path/$orig_name"
+                        mv "$current_file" "$target_path/$orig_name" 2>/dev/null
+                    fi
+                    ((restored_count++))
+                    break
+                fi
+            done
+        fi
+    done
+    echo "Hash-based Name restoration complete: $restored_count files restored"
+}
+
+# Folder encryption
+encFolder01() {
+    if [[ -z $pass ]]; then
+        setPass "hash" || return 1
+    fi
+
+    # Get all directories (deepest first)
+    local tree=( $(find . -type d ! -path "." 2>/dev/null | grep -v "^\./$(basename "$CONFIG_DIR")" | sed 's/^\.\///' | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-) )
+    
+    for folder_item in "${tree[@]}"; do
+        local folder=$(getFile "$folder_item")
+        
+        # Skip if already hashed
+        if [[ $(isaEncOne ${folder}) == 1 ]]; then
+            continue
+        fi
+        
+        local root=$(getROOT "$folder_item")
+        local C_folder=$(encrypt "${folder}/")
+        
+        echo "Renaming folder: $folder_item -> $root/$C_folder"
+        mv "$folder_item" "$root/$C_folder" 2>/dev/null
+    done
+}
+
+# Folder decryption
+decFolder01() {
+    if [[ -z $pass ]]; then
+        setPass "hash" || return 1
+    fi
+
+    if [[ ! -f "$pathToFolder" ]]; then
+        echo "Database file not found: $pathToFolder"
+        return 1
+    fi
+
+    local allfolders=()
+    while IFS= read -r line; do
+        allfolders+=("$line")
+    done < "$pathToFolder"
+    
+    # Get all directories (deepest first)
+    local tree=( $(find . -type d ! -path "." 2>/dev/null | grep -v "^\./$(basename "$CONFIG_DIR")" | sed 's/^\.\///' | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-) )
+    
+    for current_folder in "${tree[@]}"; do
+        local current_name=$(getFile "$current_folder")
+        local current_path=$(getROOT "$current_folder")
+        
+        # Check if current name looks like a hash
+        if [[ $(isaEncOne ${current_name}) == 1 ]]; then
+            # Try to find matching original
+            for original in "${allfolders[@]}"; do
+                local orig_name=$(getFile "$original")
+                local orig_path=$(getROOT "$original")
+                local C_orig=$(encrypt "${orig_name}/")
+                
+                if [[ "$current_name" == "$C_orig" ]]; then
+                    # Create target directory if needed
+                    if [[ "$current_path" != "$orig_path" ]]; then
+                        mkdir -p "$orig_path"
+                    fi
+                    
+                    echo "Restoring folder: $current_folder -> $orig_path/$orig_name"
+                    mv "$current_folder" "$orig_path/$orig_name" 2>/dev/null
+                    break
+                fi
+            done
+        fi
+    done
+}
+
+# COMPLETE ENCRYPTION
+encrypt_complete() {
+    echo "=== COMPLETE ENCRYPTION PROCESS === ${hash^^} AND ${cpt^^}"
+    echo "Step 1: Save database of original names"
+    echo "--------------------------------------------------------"
+    saveDatabases
+    
+    echo -e "\nStep 2: ${cpt^^} Content Encryption"
+    echo "--------------------------------------------------------"
+    if [[ "$cpt" == "ssl" ]]; then
+        enc_ssl
+    elif [[ "$cpt" == "gpg" ]]; then
+        enc_gpg
+    elif [[ "$cpt" == "aes" ]]; then
+        enc_aes
+    elif [[ "$cpt" == "rsa" ]]; then
+        enc_rsa
+    fi
+    
+    echo -e "\nStep 3: Hash-based Filename Encryption"
+    echo "--------------------------------------------------------"
+    encFile01
+    encFolder01
+    
+    echo -e "\n=== ENCRYPTION COMPLETE ==="
+    echo "All files encrypted. To decrypt, use: $0 decrypt"
+    echo "Database saved in: $CONFIG_DIR"
+}
+
+# COMPLETE DECRYPTION
+decrypt_complete() {
+    echo "=== COMPLETE DECRYPTION PROCESS ==="
+    
+    # First, ensure databases exist
+    if [[ ! -f "$pathToFile" ]] || [[ ! -f "$pathToFolder" ]]; then
+        echo "ERROR: Database files not found in $CONFIG_DIR"
+        echo "Cannot restore original names without database."
+        return 1
+    fi
+    
+    echo "Step 1: Hash-based Filename Restoration"
+    echo "--------------------------------------------------------"
+    decFile01
+    decFolder01
+    
+    echo -e "\nStep 2: ${cpt^^} Content Decryption"
+    echo "--------------------------------------------------------"
+    if [[ "$cpt" == "ssl" ]]; then
+        dec_ssl
+    elif [[ "$cpt" == "gpg" ]]; then
+        dec_gpg
+    elif [[ "$cpt" == "aes" ]]; then
+        dec_aes
+    elif [[ "$cpt" == "rsa" ]]; then
+        dec_rsa
+    fi
+    
+    echo -e "\n=== DECRYPTION COMPLETE ==="
+    echo "All files restored to original state"
+}
+
+# Configure AES parameters
+set_aes_params() {
+    echo "Current AES settings: ${aes_bits}-bit, ${aes_mode} mode"
+    echo ""
+    echo "Select AES key size:"
+    echo "1) 128 bits"
+    echo "2) 192 bits"
+    echo "3) 256 bits (default)"
+    read -p "Choice [1-3]: " bits_choice
+    
+    case $bits_choice in
+        1) aes_bits=128 ;;
+        2) aes_bits=192 ;;
+        3|"") aes_bits=256 ;;
+        *) echo "Invalid choice, keeping current: $aes_bits" ;;
+    esac
+    
+    echo ""
+    echo "Select AES mode:"
+    echo "1) CBC (Cipher Block Chaining) - recommended"
+    echo "2) CFB (Cipher Feedback)"
+    echo "3) OFB (Output Feedback)"
+    echo "4) ECB (Electronic Codebook) - not recommended"
+    read -p "Choice [1-4]: " mode_choice
+    
+    case $mode_choice in
+        1|"") aes_mode="cbc" ;;
+        2) aes_mode="cfb" ;;
+        3) aes_mode="ofb" ;;
+        4) aes_mode="ecb" ;;
+        *) echo "Invalid choice, keeping current: $aes_mode" ;;
+    esac
+    
+    echo "AES settings updated: ${aes_bits}-bit, ${aes_mode} mode"
+}
+
+# Configure RSA parameters
+set_rsa_params() {
+    echo "Current RSA settings: ${rsa_bits} bits"
+    echo ""
+    echo "Select RSA key size:"
+    echo "1) 1024 bits (weak, not recommended)"
+    echo "2) 2048 bits (default, recommended)"
+    echo "3) 4096 bits (strong, slower)"
+    read -p "Choice [1-3]: " bits_choice
+    
+    case $bits_choice in
+        1) rsa_bits=1024 ;;
+        2|"") rsa_bits=2048 ;;
+        3) rsa_bits=4096 ;;
+        *) echo "Invalid choice, keeping current: $rsa_bits" ;;
+    esac
+    
+    echo "RSA settings updated: ${rsa_bits} bits"
+    echo "Note: New keys will be generated on next RSA encryption"
+}
+
+# Main script execution
+case "$1" in
+    encrypt|main)
+        encrypt_complete
+        ;;
+    decrypt|notmain)
+        decrypt_complete
+        ;;
+    encssl)
+        # For SSL only, still need to save database if not exists
+        cpt="ssl"
+        if [[ ! -f "$pathToFile" ]]; then
+            saveDatabases
+        fi
+        enc_ssl
+        ;;
+    decssl)
+        cpt="ssl"
+        dec_ssl
+        ;;
+    encgpg)
+        # For GPG only, still need to save database if not exists
+        cpt="gpg"
+        if [[ ! -f "$pathToFile" ]]; then
+            saveDatabases
+        fi
+        enc_gpg
+        ;;
+    decgpg)
+        cpt="gpg"
+        dec_gpg
+        ;;
+    encaes)
+        # For AES only, still need to save database if not exists
+        cpt="aes"
+        if [[ ! -f "$pathToFile" ]]; then
+            saveDatabases
+        fi
+        enc_aes
+        ;;
+    decaes)
+        cpt="aes"
+        dec_aes
+        ;;
+    encrsa)
+        # For RSA only, still need to save database if not exists
+        cpt="rsa"
+        if [[ ! -f "$pathToFile" ]]; then
+            saveDatabases
+        fi
+        enc_rsa
+        ;;
+    decrsa)
+        cpt="rsa"
+        dec_rsa
+        ;;
+    genrsa)
+        generate_rsa_keys
+        ;;
+    encmd5)
+        cpt="$cpt"  # Keep current cpt setting
+        if [[ ! -f "$pathToFile" ]]; then
+            echo "WARNING: No database found. Run 'encrypt' first for full encryption."
+            saveDatabases
+        fi
+        encFile01
+        encFolder01
+        ;;
+    decmd5)
+        cpt="$cpt"  # Keep current cpt setting
+        decFile01
+        decFolder01
+        ;;
+    setmode)
+        if [[ "$2" == "ssl" || "$2" == "gpg" || "$2" == "aes" || "$2" == "rsa" ]]; then
+            cpt="$2"
+            echo "Encryption mode set to: $cpt"
+        else
+            echo "Usage: $0 setmode [ssl|gpg|aes|rsa]"
+        fi
+        ;;
+    setaes)
+        set_aes_params
+        ;;
+    setrsa)
+        set_rsa_params
+        ;;
+    status)
+        echo "Current configuration:"
+        echo "  Encryption mode: $cpt"
+        echo "  Hash algorithm: $hash"
+        echo "  AES settings: ${aes_bits}-bit, ${aes_mode} mode"
+        echo "  RSA settings: ${rsa_bits} bits"
+        echo "  Database: $CONFIG_DIR"
+        echo "  Files in database: $(wc -l < "$pathToFile" 2>/dev/null || echo 0)"
+        echo "  Folders in database: $(wc -l < "$pathToFolder" 2>/dev/null || echo 0)"
+        if [[ -f "$pathToRsaPub" ]]; then
+            echo "  RSA keys: Present"
+        else
+            echo "  RSA keys: Not generated (use 'genrsa' to create)"
+        fi
+        ;;
+    help|--help|-h)
+        echo "Usage: $0 [command]"
+        echo ""
+        echo "COMPLETE OPERATIONS:"
+        echo "  encrypt  - COMPLETE: Save database, encrypt content, THEN hash rename"
+        echo "  decrypt  - COMPLETE: Hash restore names FIRST, THEN decrypt content"
+        echo ""
+        echo "CONTENT ENCRYPTION ONLY:"
+        echo "  encssl   - ONLY encrypt file contents with SSL (creates .ssl files)"
+        echo "  decssl   - ONLY decrypt .ssl files back to original"
+        echo "  encgpg   - ONLY encrypt file contents with GPG (creates .gpg files)"
+        echo "  decgpg   - ONLY decrypt .gpg files back to original"
+        echo "  encaes   - ONLY encrypt file contents with AES (creates .aes files)"
+        echo "  decaes   - ONLY decrypt .aes files back to original"
+        echo "  encrsa   - ONLY encrypt file contents with RSA (creates .rsa files)"
+        echo "  decrsa   - ONLY decrypt .rsa files back to original"
+        echo ""
+        echo "FILENAME ENCRYPTION ONLY:"
+        echo "  encmd5   - ONLY rename files to $hash hashes"
+        echo "  decmd5   - ONLY restore original filenames from $hash hashes"
+        echo ""
+        echo "RSA KEY MANAGEMENT:"
+        echo "  genrsa   - Generate new RSA key pair"
+        echo "  setrsa   - Configure RSA parameters (key size)"
+        echo ""
+        echo "CONFIGURATION:"
+        echo "  setmode  - Set encryption mode: ssl, gpg, aes, or rsa (current: $cpt)"
+        echo "  setaes   - Configure AES parameters (bits and mode)"
+        echo "  status   - Show current configuration"
+        echo "  help     - Show this help message"
+        echo ""
+        echo "Database location: $CONFIG_DIR"
+        echo "Current hash algorithm: $hash"
+        echo "Current encryption mode: $cpt"
+        echo "AES settings: ${aes_bits}-bit, ${aes_mode} mode"
+        echo "RSA settings: ${rsa_bits} bits"
+        ;;
+    *)
+        if [[ -z $1 ]]; then
+            echo "No command specified. Use '$0 help' for usage information"
+        else
+            echo "Unknown command: $1"
+            echo "Use '$0 help' for usage information"
+        fi
+        exit 1
+        ;;
+esac
